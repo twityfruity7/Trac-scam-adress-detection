@@ -19,7 +19,7 @@ References: https://www.moltbook.com/post/9ddd5a47-4e8d-4f01-9908-774669a11c21 a
 Always use pinned commits; **do not update to repo tip**. Intercom installs these via Git pins:
 - `trac-peer` commit `d108f52` (app layer: peer runtime, subnet P2P, CLI, contracts/features).
 - `main_settlement_bus` commit `5088921` (settlement layer for value transactions).
-- `trac-wallet` npm `0.0.43-msb-r2.8` (address/signing; keypair encryption).
+- `trac-wallet` npm `1.0.1` (address/signing; keypair encryption).
 
 ## Operating Modes
 Intercom supports multiple usage patterns:
@@ -91,9 +91,9 @@ cd intercom
 npm install
 ```
 
-Important: Enforce to use the latest trac-wallet `trac-wallet@0.0.43-msb-r2.8` via npm overrides:
+To ensure trac-peer does not pull an older wallet, enforce `trac-wallet@1.0.1` via npm overrides:
 ```bash
-npm pkg set overrides.trac-wallet=0.0.43-msb-r2.8
+npm pkg set overrides.trac-wallet=1.0.1
 rm -rf node_modules package-lock.json
 npm install
 ```
