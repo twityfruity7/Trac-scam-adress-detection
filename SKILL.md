@@ -210,6 +210,7 @@ Intercom must expose and describe all interactive commands so agents can operate
 
 ## SC‑Bridge (WebSocket) Protocol
 SC‑Bridge exposes sidechannel messages over WebSocket and accepts inbound commands.
+It is the **primary way for agents to read and place sidechannel messages** when interactive TTY control is not feasible.
 
 **Filter syntax**
 - `alpha+beta|gamma` means **(alpha AND beta) OR gamma**.
