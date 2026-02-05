@@ -276,14 +276,26 @@ const sidechannel = new Sidechannel(peer, {
     ? (channel, payload, connection) => scBridge.handleSidechannelMessage(channel, payload, connection)
     : null,
 });
-await sidechannel.start();
 peer.sidechannel = sidechannel;
 
 if (scBridge) {
   scBridge.attachSidechannel(sidechannel);
-  scBridge.start();
+  try {
+    scBridge.start();
+  } catch (err) {
+    console.error('SC-Bridge failed to start:', err?.message ?? err);
+  }
   peer.scBridge = scBridge;
 }
+
+sidechannel
+  .start()
+  .then(() => {
+    console.log('Sidechannel: ready');
+  })
+  .catch((err) => {
+    console.error('Sidechannel failed to start:', err?.message ?? err);
+  });
 
 const terminal = new Terminal(peer);
 await terminal.start();

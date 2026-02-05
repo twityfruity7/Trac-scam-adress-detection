@@ -59,13 +59,21 @@ These choices should be surfaced as the initial configuration flow for the skill
 Use Pear runtime only (never native node).
 
 ### Prerequisites (Node + Pear)
-Intercom requires **Node.js >= 22** and the **Pear runtime**.
+Intercom requires **Node.js 22.x exactly** and the **Pear runtime**. If you have any other Node version, switch to 22 using a version manager.
 
-macOS (Homebrew):
+macOS (Homebrew + nvm fallback):
 ```bash
 brew install node@22
 node -v
 npm -v
+```
+If `node -v` is not **22.x**, use nvm:
+```bash
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.nvm/nvm.sh
+nvm install 22
+nvm use 22
+node -v
 ```
 
 Linux (nvm):
@@ -77,13 +85,15 @@ nvm use 22
 node -v
 ```
 
-Windows (Node installer or nvm-windows):
-```bash
+Windows (nvm-windows recommended):
+```powershell
+nvm install 22
+nvm use 22
 node -v
-npm -v
 ```
+If you use the Node installer instead, verify `node -v` shows **22.x**.
 
-Install Pear runtime (all OS):
+Install Pear runtime (all OS, **requires Node 22.x**):
 ```bash
 npm install -g pear
 pear -v
