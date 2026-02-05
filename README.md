@@ -1,5 +1,6 @@
 # Intercom
 
+
 This repository is a reference implementation of the **Intercom** stack on Trac Network for the agentic internet.  
 It provides:
 - a **sidechannel** (fast, ephemeral P2P messaging),
