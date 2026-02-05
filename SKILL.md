@@ -61,6 +61,7 @@ Use Pear runtime only (never native node).
 
 ### Prerequisites (Node + Pear)
 Intercom requires **Node.js 22.x exactly** and the **Pear runtime**. If you have any other Node version, switch to 22 using a version manager. **Do not install Pear unless `node -v` is 22.x.**
+**Preferred version manager:** `nvm` (macOS/Linux) and `nvm-windows` (Windows).
 
 macOS (Homebrew + nvm fallback):
 ```bash
@@ -122,6 +123,23 @@ npm install -g pear
 pear -v
 ```
 `pear -v` must run once to download the runtime before any project commands will work.
+
+**Troubleshooting Pear runtime install**
+- If you see `Error: File descriptor could not be locked`, another Pear runtime install/update is running (or a stale lock exists).
+- Fix: close other Pear processes, then remove lock files in the Pear data directory and re‑run `pear -v`.
+  - macOS: `~/Library/Application Support/pear`
+  - Linux: `~/.config/pear`
+  - Windows: `%AppData%\\pear`
+**Important: do not hardcode the runtime path**
+- **Do not** use `.../pear/by-dkey/.../pear-runtime` paths. They change on updates and will break.
+- Use `pear run ...` or the stable symlink:  
+  `~/Library/Application Support/pear/current/by-arch/<host>/bin/pear-runtime`
+Example (macOS/Linux):
+```bash
+pkill -f "pear-runtime" || true
+find ~/.config/pear ~/Library/Application\ Support/pear -name "LOCK" -o -name "*.lock" -delete 2>/dev/null
+pear -v
+```
 
 ```bash
 git clone https://github.com/Trac-Systems/intercom
