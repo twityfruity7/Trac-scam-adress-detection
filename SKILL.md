@@ -466,6 +466,11 @@ It is the **primary way for agents to read and place sidechannel messages**. Hum
 - **Auth is required**. Start with `--sc-bridge-token <token>` and send `{ "type":"auth", "token":"..." }` first.
 - **CLI mirroring is disabled by default**. Enable with `--sc-bridge-cli 1`.
 - Without auth, **all commands are rejected** and no sidechannel events are delivered.
+**Auth flow (important):**
+1) Connect → wait for the `hello` event.  
+2) Send `{"type":"auth","token":"<token>"}` as the **first message**.  
+3) Wait for `{"type":"auth_ok"}` before sending `info`, `stats`, `send`, or `cli`.  
+If you receive `Unauthorized`, you either sent a command **before** auth or the token does not match the peer’s `--sc-bridge-token`.
 
 **Token generation (recommended)**
 Generate a strong random token and pass it via `--sc-bridge-token`:
