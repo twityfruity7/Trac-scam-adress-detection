@@ -143,7 +143,7 @@ pear -v
 
 ```bash
 git clone https://github.com/Trac-Systems/intercom
-cd intercom
+cd intercom/trac/contract-test-latest
 npm install
 ```
 
