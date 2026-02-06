@@ -88,6 +88,9 @@ class Sidechannel extends Feature {
     this.inviteRequiredChannels = Array.isArray(config.inviteRequiredChannels)
       ? new Set(config.inviteRequiredChannels.map((c) => String(c)))
       : null;
+    this.inviteRequiredPrefixes = Array.isArray(config.inviteRequiredPrefixes)
+      ? config.inviteRequiredPrefixes.map((c) => String(c))
+      : null;
     const inviterKeys = Array.isArray(config.inviterKeys)
       ? config.inviterKeys
           .map((value) => normalizeKeyHex(value))
@@ -312,7 +315,15 @@ class Sidechannel extends Feature {
   _inviteRequired(channel) {
     if (this._isEntry(channel)) return false;
     if (!this.inviteRequired) return false;
-    if (this.inviteRequiredChannels) return this.inviteRequiredChannels.has(channel);
+    const hasList = this.inviteRequiredChannels || this.inviteRequiredPrefixes;
+    if (this.inviteRequiredChannels && this.inviteRequiredChannels.has(channel)) return true;
+    if (this.inviteRequiredPrefixes) {
+      for (const prefix of this.inviteRequiredPrefixes) {
+        if (prefix && channel.startsWith(prefix)) return true;
+      }
+    }
+    // If the caller configured a list/prefix set, invites are only required for those entries.
+    if (hasList) return false;
     return true;
   }
 

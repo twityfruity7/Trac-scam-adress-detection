@@ -1,2 +1,17 @@
+.nvmrc
 stores
 node_modules
+
+# IDE / OS noise
+.idea/
+.DS_Store
+
+# Local planning / scratch (intentionally untracked)
+progress.md
+
+# Local chain/node data, configs, secrets (intentionally untracked)
+onchain/
+
+# Rust/Solana build artifacts (may include generated keypairs)
+target/
+**/target/
