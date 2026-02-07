@@ -70,6 +70,7 @@ class ScBridge extends Feature {
     super(peer, config);
     this.key = 'sc-bridge';
     this.sidechannel = null;
+    this.priceOracle = null;
     this.server = null;
     this.started = false;
     this.clients = new Set();
@@ -93,6 +94,10 @@ class ScBridge extends Feature {
 
   attachSidechannel(sidechannel) {
     this.sidechannel = sidechannel;
+  }
+
+  attachPriceOracle(priceOracle) {
+    this.priceOracle = priceOracle;
   }
 
   _broadcastToClient(client, payload) {
@@ -181,6 +186,27 @@ class ScBridge extends Feature {
     }
 
     switch (message.type) {
+      case 'price_get': {
+        const oracle = this.priceOracle || this.peer?.priceOracle || null;
+        if (!oracle || typeof oracle.getSnapshot !== 'function') {
+          sendError('Price oracle not enabled.');
+          return;
+        }
+        const snapshot = oracle.getSnapshot();
+        if (!snapshot) {
+          reply({
+            type: 'price_snapshot',
+            ts: Date.now(),
+            ok: false,
+            providers: oracle?.oracle?.providers ? oracle.oracle.providers.map((p) => p.id) : [],
+            pairs: {},
+            error: 'no_snapshot_yet',
+          });
+          return;
+        }
+        reply(snapshot);
+        return;
+      }
       case 'cli': {
         if (!this.cliEnabled) {
           sendError('CLI over WS is disabled.');
@@ -362,7 +388,12 @@ class ScBridge extends Feature {
         }
         const channels = Array.from(this.sidechannel.channels.keys());
         const connectionCount = this.sidechannel.connections.size;
-        reply({ type: 'stats', channels, connectionCount });
+        reply({
+          type: 'stats',
+          channels,
+          connectionCount,
+          sidechannelStarted: this.sidechannel.started === true,
+        });
         return;
       }
       case 'info': {
@@ -571,6 +602,9 @@ class ScBridge extends Feature {
         entryChannel: this.sidechannel?.entryChannel ?? null,
         filter: this.defaultFilterRaw || '',
         requiresAuth: this.requireAuth,
+        capabilities: {
+          priceOracle: !!(this.priceOracle || this.peer?.priceOracle),
+        },
       };
       this._broadcastToClient(client, hello);
 

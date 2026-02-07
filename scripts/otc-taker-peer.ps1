@@ -22,5 +22,4 @@ if (-not (Test-Path -Path $tokenFile)) {
 
 $scToken = (Get-Content -Raw -Path $tokenFile).Trim()
 
-node scripts/otc-taker.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken @rest
-
+node scripts/otc-taker.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken --receipts-db ("onchain/receipts/{0}.sqlite" -f $storeName) @rest

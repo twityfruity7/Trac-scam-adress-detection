@@ -85,7 +85,7 @@ const parseWelcomeArg = (raw) => {
     return null;
 };
 
-class SampleProtocol extends Protocol{
+class IntercomSwapProtocol extends Protocol{
 
     /**
      * Extending from Protocol inherits its capabilities and allows you to define your own protocol.
@@ -114,9 +114,7 @@ class SampleProtocol extends Protocol{
      * @returns {Promise<void>}
      */
     async extendApi(){
-        this.api.getSampleData = function(){
-            return 'Some sample data';
-        }
+        // No protocol-specific RPC API methods yet.
     }
 
     /**
@@ -132,76 +130,9 @@ class SampleProtocol extends Protocol{
      * @returns {{type: string, value: *}|null}
      */
     mapTxCommand(command){
-        // prepare the payload
-        let obj = { type : '', value : null };
-        /*
-        Triggering contract function in terminal will look like this:
-
-        /tx --command 'something'
-
-        You can also simulate a tx prior broadcast
-
-        /tx --command 'something' --sim 1
-
-        To programmatically execute a transaction from "outside",
-        the api function "this.api.tx()" needs to be exposed by adding
-        "api_tx_exposed : true" to the Peer instance options.
-        Once exposed, it can be used directly through peer.protocol_instance.api.tx()
-
-        Please study the superclass of this Protocol and Protocol.api to learn more.
-        */
-        if(command === 'something'){
-            // type points at the "storeSomething" function in the contract.
-            obj.type = 'storeSomething';
-            // value can be null as there is no other payload, but the property must exist.
-            obj.value = null;
-            // return the payload to be used in your contract
-            return obj;
-        } else if (command === 'read_snapshot') {
-            obj.type = 'readSnapshot';
-            obj.value = null;
-            return obj;
-        } else if (command === 'read_chat_last') {
-            obj.type = 'readChatLast';
-            obj.value = null;
-            return obj;
-        } else if (command === 'read_timer') {
-            obj.type = 'readTimer';
-            obj.value = null;
-            return obj;
-        } else {
-            /*
-            now we assume our protocol allows to submit a json string with information
-            what to do (the op) then we pass the parsed object to the value.
-            the accepted json string can be executed as tx like this:
-
-            /tx --command '{ "op" : "do_something", "some_key" : "some_data" }'
-
-            Of course we can simulate this, as well:
-
-            /tx --command '{ "op" : "do_something", "some_key" : "some_data" }' --sim 1
-            */
-            const json = this.safeJsonParse(command);
-            if(json.op !== undefined && json.op === 'do_something'){
-                obj.type = 'submitSomething';
-                obj.value = json;
-                return obj;
-            } else if (json.op !== undefined && json.op === 'read_key') {
-                obj.type = 'readKey';
-                obj.value = json;
-                return obj;
-            } else if (json.op !== undefined && json.op === 'read_chat_last') {
-                obj.type = 'readChatLast';
-                obj.value = null;
-                return obj;
-            } else if (json.op !== undefined && json.op === 'read_timer') {
-                obj.type = 'readTimer';
-                obj.value = null;
-                return obj;
-            }
-        }
-        // return null if no case matches.
-        // if you do not return null, your protocol might behave unexpected.
+        // Intentionally disabled: this app is swap-sidechannel oriented and should not
+        // encourage Trac tx execution (fees, validators, global state). Keep contract
+        // stack minimal and local.
         return null;
     }
 
@@ -212,12 +143,8 @@ class SampleProtocol extends Protocol{
      */
     async printOptions(){
         console.log(' ');
-        console.log('- Sample Commands:');
-        console.log("- /print | use this flag to print some text to the terminal: '--text \"I am printing\"");
         console.log('- /get --key "<key>" [--confirmed true|false] | reads subnet state key (confirmed defaults to true).');
         console.log('- /msb | prints MSB txv + lengths (local MSB node view).');
-        console.log('- /tx --command "read_chat_last" | prints last chat message captured by contract.');
-        console.log('- /tx --command "read_timer" | prints current timer feature value.');
         console.log('- /sc_join --channel "<name>" | join an ephemeral sidechannel (no autobase).');
         console.log('- /sc_open --channel "<name>" [--via "<channel>"] [--invite <json|b64|@file>] [--welcome <json|b64|@file>] | request others to open a sidechannel.');
         console.log('- /sc_send --channel "<name>" --message "<text>" [--invite <json|b64|@file>] | send message over sidechannel.');
@@ -584,11 +511,7 @@ class SampleProtocol extends Protocol{
             console.log({ channels, connectionCount });
             return;
         }
-        if (this.input.startsWith("/print")) {
-            const splitted = this.parseArgs(input);
-            console.log(splitted.text);
-        }
     }
 }
 
-export default SampleProtocol;
+export default IntercomSwapProtocol;

@@ -73,6 +73,10 @@ This repo includes `scripts/swapctl.mjs` (with wrappers `scripts/swapctl.sh` and
 - inspect a running peer via SC-Bridge (`info`, `stats`) and watch sidechannel traffic (`watch`)
 - verify swap pre-pay safety checks (offline + optional Solana on-chain validation) (`verify-prepay`)
 
+This repo also includes `scripts/swaprecover.mjs` (with wrappers `scripts/swaprecover.sh` and `scripts/swaprecover.ps1`) to deterministically:
+- list/show local trade receipts from a local-only SQLite DB under `onchain/` (gitignored)
+- recover a stuck claim on Solana if the agent crashed after paying LN (requires `ln_preimage_hex` to be available in receipts)
+
 If a request cannot be fulfilled with a one-liner, create role-specific scripts (service vs client) that fully specify flags, channels, RPC endpoints, and wallet paths.
 
 This repo also provides dev-oriented role scripts:
@@ -96,6 +100,8 @@ These bots are designed for:
 To avoid copy/pasting SC-Bridge URLs/tokens for the bots, use:
 - `scripts/otc-maker-peer.sh`, `scripts/otc-maker-peer.ps1`
 - `scripts/otc-taker-peer.sh`, `scripts/otc-taker-peer.ps1`
+
+These wrappers also set `--receipts-db onchain/receipts/<store>.sqlite` by default (local-only; gitignored) so swaps have a recovery path.
 
 To avoid copy/pasting SC-Bridge URLs/tokens, use the wrappers that read the token from `onchain/sc-bridge/<store>.token`:
 - `scripts/swapctl-peer.sh <storeName> <scBridgePort> ...`
@@ -732,6 +738,49 @@ For operators/agents, use:
   - solana validator ledgers, bitcoin data dirs, LN credentials (macaroons/certs/rpc sockets), `.env` files, API keys, logs.
 - Intercom peer state lives under `stores/` (gitignored).
 - Never commit secrets or working node data to tracked folders.
+
+### Price Oracle (Feature; Mandatory For Guardrails)
+Price discovery is implemented as a **trac-peer Feature** (HTTP calls must never run in contract execution).
+
+Peer flags (enable + configure):
+- `--price-oracle 1`
+- `--price-providers "<csv>"` (default: `binance,coinbase,gate,kucoin,okx,bitstamp,kraken`)
+- `--price-poll-ms <ms>` (default `5000`)
+- `--price-timeout-ms <ms>` (default `4000`)
+- `--price-required-providers <n>` (default `5`)
+- `--price-min-ok <n>` (default `2`)
+- `--price-min-agree <n>` (default `2`)
+- `--price-max-deviation-bps <bps>` (default `50`)
+- Optional: `--price-pairs "BTC_USDT,USDT_USD"` (defaults to both)
+
+Deterministic/offline mode (recommended for tests):
+- `--price-oracle 1 --price-providers static --price-static-btc-usdt 200000 --price-static-usdt-usd 1 --price-static-count 5 --price-poll-ms 200`
+
+SC-Bridge RPC:
+- `price_get` returns the latest `price_snapshot`.
+- Clients: `ScBridgeClient.priceGet()`.
+
+Bot guardrails (defaults are fail-closed):
+- Maker: `scripts/otc-maker.mjs`
+  - `--price-guard 0|1` (default `1`)
+  - `--price-max-age-ms <ms>` (default `15000`)
+  - `--maker-spread-bps <bps>` (default `0`): counterquote discount vs oracle price
+  - `--maker-max-overpay-bps <bps>` (default `0`): if RFQ implies a price above oracle by more than this, maker counterquotes instead of echoing the RFQ
+- Taker: `scripts/otc-taker.mjs`
+  - `--price-guard 0|1` (default `1`)
+  - `--price-max-age-ms <ms>` (default `15000`)
+  - `--taker-max-discount-bps <bps>` (default `200`): reject quotes and abort before LN pay if implied price is below oracle by more than this
+  - `--solana-decimals <n>` (default `6`): used only for implied-price calculations
+
+### Receipts + Recovery (Mandatory)
+Swaps require a local-only recovery path in case an agent crashes mid-trade.
+
+- Maker/taker bots can be run with `--receipts-db onchain/receipts/<name>.sqlite` to persist a minimal “trade receipt” (payment hash, Solana escrow addresses, timelocks, etc.).
+- If `--receipts-db` is set on the taker, the taker defaults to persisting `ln_preimage_hex` too (sensitive, but required for offline recovery). Disable with `--persist-preimage 0` if your LN stack can reliably re-export preimages later.
+
+Recovery tool:
+- `scripts/swaprecover.sh show --receipts-db onchain/receipts/<name>.sqlite --trade-id <id>`
+- `scripts/swaprecover.sh claim --receipts-db onchain/receipts/<name>.sqlite --trade-id <id> --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json`
 
 ### Local Unattended E2E (Recommended)
 Prereqs:

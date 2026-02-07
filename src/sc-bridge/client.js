@@ -127,4 +127,8 @@ export class ScBridgeClient extends EventEmitter {
   async sign(payload) {
     return this._rpc('sign', { payload });
   }
+
+  async priceGet() {
+    return this._rpc('price_get', {});
+  }
 }

@@ -14,6 +14,7 @@ import SampleContract from './contract/contract.js';
 import { Timer } from './features/timer/index.js';
 import Sidechannel from './features/sidechannel/index.js';
 import ScBridge from './features/sc-bridge/index.js';
+import PriceOracleFeature from './features/price/index.js';
 
 const { env, storeLabel, flags } = getPearRuntime();
 
@@ -78,6 +79,18 @@ const sidechannelsRaw =
 const parseBool = (value, fallback) => {
   if (value === undefined || value === null || value === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+};
+
+const parseIntOpt = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number.parseInt(String(value), 10);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const parseFloatOpt = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number.parseFloat(String(value));
+  return Number.isFinite(n) ? n : fallback;
 };
 
 const msbEnabledRaw =
@@ -342,6 +355,76 @@ const scBridgeDebugRaw =
   '';
 const scBridgeDebug = parseBool(scBridgeDebugRaw, false);
 
+const priceOracleEnabledRaw =
+  (flags['price-oracle'] && String(flags['price-oracle'])) ||
+  env.PRICE_ORACLE ||
+  '';
+const priceOracleEnabled = parseBool(priceOracleEnabledRaw, false);
+const priceOracleDebugRaw =
+  (flags['price-oracle-debug'] && String(flags['price-oracle-debug'])) ||
+  env.PRICE_ORACLE_DEBUG ||
+  '';
+const priceOracleDebug = parseBool(priceOracleDebugRaw, false);
+const priceOraclePollMsRaw =
+  (flags['price-poll-ms'] && String(flags['price-poll-ms'])) ||
+  env.PRICE_POLL_MS ||
+  '';
+const priceOraclePollMs = parseIntOpt(priceOraclePollMsRaw, 5000);
+const priceOracleProvidersRaw =
+  (flags['price-providers'] && String(flags['price-providers'])) ||
+  env.PRICE_PROVIDERS ||
+  '';
+const priceOraclePairsRaw =
+  (flags['price-pairs'] && String(flags['price-pairs'])) ||
+  env.PRICE_PAIRS ||
+  '';
+const priceOraclePairs = priceOraclePairsRaw
+  ? priceOraclePairsRaw
+      .split(',')
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0)
+  : null;
+const priceOracleRequiredProvidersRaw =
+  (flags['price-required-providers'] && String(flags['price-required-providers'])) ||
+  env.PRICE_REQUIRED_PROVIDERS ||
+  '';
+const priceOracleRequiredProviders = parseIntOpt(priceOracleRequiredProvidersRaw, 5);
+const priceOracleMinOkRaw =
+  (flags['price-min-ok'] && String(flags['price-min-ok'])) ||
+  env.PRICE_MIN_OK ||
+  '';
+const priceOracleMinOk = parseIntOpt(priceOracleMinOkRaw, 2);
+const priceOracleMinAgreeRaw =
+  (flags['price-min-agree'] && String(flags['price-min-agree'])) ||
+  env.PRICE_MIN_AGREE ||
+  '';
+const priceOracleMinAgree = parseIntOpt(priceOracleMinAgreeRaw, 2);
+const priceOracleMaxDeviationBpsRaw =
+  (flags['price-max-deviation-bps'] && String(flags['price-max-deviation-bps'])) ||
+  env.PRICE_MAX_DEVIATION_BPS ||
+  '';
+const priceOracleMaxDeviationBps = parseFloatOpt(priceOracleMaxDeviationBpsRaw, 50);
+const priceOracleTimeoutMsRaw =
+  (flags['price-timeout-ms'] && String(flags['price-timeout-ms'])) ||
+  env.PRICE_TIMEOUT_MS ||
+  '';
+const priceOracleTimeoutMs = parseIntOpt(priceOracleTimeoutMsRaw, 4000);
+const priceOracleStaticBtcUsdtRaw =
+  (flags['price-static-btc-usdt'] && String(flags['price-static-btc-usdt'])) ||
+  env.PRICE_STATIC_BTC_USDT ||
+  '';
+const priceOracleStaticBtcUsdt = parseFloatOpt(priceOracleStaticBtcUsdtRaw, null);
+const priceOracleStaticUsdtUsdRaw =
+  (flags['price-static-usdt-usd'] && String(flags['price-static-usdt-usd'])) ||
+  env.PRICE_STATIC_USDT_USD ||
+  '';
+const priceOracleStaticUsdtUsd = parseFloatOpt(priceOracleStaticUsdtUsdRaw, null);
+const priceOracleStaticCountRaw =
+  (flags['price-static-count'] && String(flags['price-static-count'])) ||
+  env.PRICE_STATIC_COUNT ||
+  '';
+const priceOracleStaticCount = parseIntOpt(priceOracleStaticCountRaw, 5);
+
 if (scBridgeEnabled && !scBridgeToken) {
   throw new Error('SC-Bridge requires --sc-bridge-token (auth is mandatory).');
 }
@@ -490,6 +573,33 @@ if (admin && admin.value === peer.wallet.publicKey && peer.base.writable) {
   timer.start().catch((err) => console.error('Timer feature stopped:', err?.message ?? err));
 }
 
+let priceOracle = null;
+if (priceOracleEnabled) {
+  const staticPrices = {};
+  if (Number.isFinite(priceOracleStaticBtcUsdt) && priceOracleStaticBtcUsdt > 0) {
+    staticPrices.BTC_USDT = priceOracleStaticBtcUsdt;
+  }
+  if (Number.isFinite(priceOracleStaticUsdtUsd) && priceOracleStaticUsdtUsd > 0) {
+    staticPrices.USDT_USD = priceOracleStaticUsdtUsd;
+  }
+  priceOracle = new PriceOracleFeature(peer, {
+    pollMs: priceOraclePollMs,
+    debug: priceOracleDebug,
+    oracleOptions: {
+      ...(priceOracleProvidersRaw ? { providerIds: priceOracleProvidersRaw } : {}),
+      ...(priceOraclePairs ? { pairs: priceOraclePairs } : {}),
+      requiredProviders: priceOracleRequiredProviders,
+      minOk: priceOracleMinOk,
+      minAgree: priceOracleMinAgree,
+      maxDeviationBps: priceOracleMaxDeviationBps,
+      timeoutMs: priceOracleTimeoutMs,
+      ...(Object.keys(staticPrices).length > 0 ? { staticPrices, staticCount: priceOracleStaticCount } : {}),
+    },
+  });
+  priceOracle.start();
+  peer.priceOracle = priceOracle;
+}
+
 let scBridge = null;
 if (scBridgeEnabled) {
   scBridge = new ScBridge(peer, {
@@ -513,6 +623,7 @@ if (scBridgeEnabled) {
       peerWriterKey,
       sidechannelEntry,
       sidechannelExtras: sidechannelExtras.slice(),
+      priceOracleEnabled,
     },
   });
 }
@@ -550,6 +661,7 @@ const sidechannel = new Sidechannel(peer, {
 peer.sidechannel = sidechannel;
 
 if (scBridge) {
+  if (priceOracle) scBridge.attachPriceOracle(priceOracle);
   scBridge.attachSidechannel(sidechannel);
   try {
     scBridge.start();

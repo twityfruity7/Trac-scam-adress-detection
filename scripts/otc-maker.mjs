@@ -16,6 +16,7 @@ import {
 import { ScBridgeClient } from '../src/sc-bridge/client.js';
 import { createUnsignedEnvelope, attachSignature } from '../src/protocol/signedMessage.js';
 import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
+import { PAIR as PRICE_PAIR } from '../src/price/providers.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
 import { createInitialTrade, applySwapEnvelope } from '../src/swap/stateMachine.js';
@@ -24,6 +25,7 @@ import {
   createEscrowTx,
   LN_USDT_ESCROW_PROGRAM_ID,
 } from '../src/solana/lnUsdtEscrowClient.js';
+import { openTradeReceiptsStore } from '../src/receipts/store.js';
 
 const execFileP = promisify(execFile);
 
@@ -78,6 +80,12 @@ function parseIntFlag(value, label, fallback = null) {
   return n;
 }
 
+function parseBps(value, label, fallback) {
+  const n = parseIntFlag(value, label, fallback);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(10_000, n));
+}
+
 function stripSignature(envelope) {
   if (!envelope || typeof envelope !== 'object') return envelope;
   const { sig: _sig, signer: _signer, ...unsigned } = envelope;
@@ -121,6 +129,35 @@ function readSolanaKeypair(filePath) {
     throw new Error(`Solana keypair must be 64 bytes (solana-keygen) or 32 bytes (seed), got ${bytes.length}`);
   }
   return bytes.length === 64 ? Keypair.fromSecretKey(bytes) : Keypair.fromSeed(bytes);
+}
+
+function quoteUsdtAmountFromOracle({ btcSats, priceUsdtPerBtc, usdtDecimals, spreadBps = 0 }) {
+  const sats = BigInt(String(btcSats));
+  const decimals = BigInt(String(usdtDecimals));
+  const scale = 10n ** decimals;
+  const priceMicro = BigInt(Math.round(Number(priceUsdtPerBtc) * 1_000_000));
+  if (priceMicro <= 0n) return null;
+
+  const denom = 100000000n * 1000000n;
+  let amount = (sats * priceMicro * scale) / denom;
+  const bps = BigInt(Math.max(0, Math.min(10_000, Number(spreadBps) || 0)));
+  if (bps > 0n) amount = (amount * (10000n - bps)) / 10000n;
+  if (amount < 0n) amount = 0n;
+  return amount.toString();
+}
+
+function impliedPriceUsdtPerBtc({ btcSats, usdtAmount, usdtDecimals }) {
+  try {
+    const sats = BigInt(String(btcSats));
+    const amt = BigInt(String(usdtAmount));
+    const denom = sats * (10n ** BigInt(String(usdtDecimals)));
+    if (sats <= 0n || denom <= 0n) return null;
+    // Return a micro-precision float: (amt * 1e8 / (sats * 10^dec)) rounded down to 1e-6.
+    const priceMicro = (amt * 100000000n * 1000000n) / denom;
+    return Number(priceMicro) / 1_000_000;
+  } catch (_e) {
+    return null;
+  }
 }
 
 async function sendAndConfirm(connection, tx) {
@@ -168,6 +205,13 @@ async function main() {
   const once = parseBool(flags.get('once'), false);
   const debug = parseBool(flags.get('debug'), false);
 
+  const priceGuard = parseBool(flags.get('price-guard'), true);
+  const priceMaxAgeMs = parseIntFlag(flags.get('price-max-age-ms'), 'price-max-age-ms', 15_000);
+  const makerSpreadBps = parseBps(flags.get('maker-spread-bps'), 'maker-spread-bps', 0);
+  const makerMaxOverpayBps = parseBps(flags.get('maker-max-overpay-bps'), 'maker-max-overpay-bps', 0);
+
+  const receiptsDbPath = flags.get('receipts-db') ? String(flags.get('receipts-db')).trim() : '';
+
   const runSwap = parseBool(flags.get('run-swap'), false);
   const swapTimeoutSec = parseIntFlag(flags.get('swap-timeout-sec'), 'swap-timeout-sec', 300);
   const swapResendMs = parseIntFlag(flags.get('swap-resend-ms'), 'swap-resend-ms', 1200);
@@ -186,6 +230,8 @@ async function main() {
   const lnNetwork = (flags.get('ln-network') && String(flags.get('ln-network')).trim()) || 'regtest';
   const lnCliBin = flags.get('ln-cli-bin') ? String(flags.get('ln-cli-bin')).trim() : '';
 
+  const receipts = receiptsDbPath ? openTradeReceiptsStore({ dbPath: receiptsDbPath }) : null;
+
   if (runSwap) {
     if (!solKeypairPath) die('Missing --solana-keypair (required when --run-swap 1)');
     if (!solMintStr) die('Missing --solana-mint (required when --run-swap 1)');
@@ -202,6 +248,39 @@ async function main() {
 
   const quotes = new Map(); // quote_id -> { rfq_id, trade_id, btc_sats, usdt_amount, sol_recipient, sol_mint }
   const swaps = new Map(); // swap_channel -> ctx
+
+  const fetchBtcUsdtMedian = async () => {
+    const res = await sc.priceGet();
+    if (!res || typeof res !== 'object') return { ok: false, error: 'price_get failed (no response)', median: null };
+    if (res.type === 'error') return { ok: false, error: String(res.error || 'price_get error'), median: null };
+    if (res.type !== 'price_snapshot') return { ok: false, error: `unexpected price_get response: ${res.type}`, median: null };
+    const snap = res;
+    if (Number.isFinite(priceMaxAgeMs) && priceMaxAgeMs > 0) {
+      const age = Date.now() - Number(snap.ts || 0);
+      if (!Number.isFinite(age) || age > priceMaxAgeMs) {
+        return { ok: false, error: `price snapshot stale (ageMs=${age})`, median: null };
+      }
+    }
+    const feed = snap?.pairs?.[PRICE_PAIR.BTC_USDT];
+    const median = Number(feed?.median);
+    if (!feed?.ok || !Number.isFinite(median) || median <= 0) {
+      return { ok: false, error: feed?.error || 'btc_usdt median unavailable', median: null };
+    }
+    return { ok: true, error: null, median };
+  };
+
+  const persistTrade = (tradeId, patch, eventKind = null, eventPayload = null) => {
+    if (!receipts) return;
+    try {
+      receipts.upsertTrade(tradeId, patch);
+      if (eventKind) receipts.appendEvent(tradeId, eventKind, eventPayload);
+    } catch (err) {
+      try {
+        receipts.upsertTrade(tradeId, { last_error: err?.message ?? String(err) });
+      } catch (_e) {}
+      if (debug) process.stderr.write(`[maker] receipts persist error: ${err?.message ?? String(err)}\n`);
+    }
+  };
 
   const sol = runSwap
     ? (() => {
@@ -220,6 +299,9 @@ async function main() {
     if (!done) return;
     const delay = Number.isFinite(onceExitDelayMs) ? Math.max(onceExitDelayMs, 0) : 0;
     setTimeout(() => {
+      try {
+        receipts?.close();
+      } catch (_e) {}
       sc.close();
       process.exit(0);
     }, delay);
@@ -266,6 +348,27 @@ async function main() {
     ctx.sent.terms = signed;
     await sc.send(ctx.swapChannel, signed);
     process.stdout.write(`${JSON.stringify({ type: 'terms_sent', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel })}\n`);
+
+    persistTrade(
+      ctx.tradeId,
+      {
+        role: 'maker',
+        otc_channel: otcChannel,
+        swap_channel: ctx.swapChannel,
+        maker_peer: makerPubkey,
+        taker_peer: ctx.inviteePubKey,
+        btc_sats: ctx.btcSats,
+        usdt_amount: ctx.usdtAmount,
+        sol_mint: signed.body.sol_mint,
+        sol_program_id: sol?.programId?.toBase58?.() ?? null,
+        sol_recipient: signed.body.sol_recipient,
+        sol_refund: signed.body.sol_refund,
+        sol_refund_after_unix: signed.body.sol_refund_after_unix,
+        state: ctx.trade.state,
+      },
+      'terms_sent',
+      signed
+    );
   };
 
   const ensureAta = async ({ connection, payer, mint, owner }) => {
@@ -320,6 +423,17 @@ async function main() {
     await sc.send(ctx.swapChannel, lnInvSigned);
     process.stdout.write(`${JSON.stringify({ type: 'ln_invoice_sent', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel, payment_hash_hex: paymentHashHex })}\n`);
 
+    persistTrade(
+      ctx.tradeId,
+      {
+        ln_invoice_bolt11: bolt11,
+        ln_payment_hash_hex: paymentHashHex,
+        state: ctx.trade.state,
+      },
+      'ln_invoice_sent',
+      lnInvSigned
+    );
+
     // Solana escrow (locks net + fee, but terms.usdt_amount is the net amount).
     const refundAfterUnix = Number(ctx.trade.terms.sol_refund_after_unix);
     if (!Number.isFinite(refundAfterUnix) || refundAfterUnix <= 0) throw new Error('Invalid sol_refund_after_unix');
@@ -367,6 +481,22 @@ async function main() {
     ctx.sent.escrow = solEscrowSigned;
     await sc.send(ctx.swapChannel, solEscrowSigned);
     process.stdout.write(`${JSON.stringify({ type: 'sol_escrow_sent', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel, tx_sig: escrowSig })}\n`);
+
+    persistTrade(
+      ctx.tradeId,
+      {
+        sol_program_id: solEscrowSigned.body.program_id,
+        sol_mint: solEscrowSigned.body.mint,
+        sol_escrow_pda: solEscrowSigned.body.escrow_pda,
+        sol_vault_ata: solEscrowSigned.body.vault_ata,
+        sol_refund_after_unix: solEscrowSigned.body.refund_after_unix,
+        sol_recipient: solEscrowSigned.body.recipient,
+        sol_refund: solEscrowSigned.body.refund,
+        state: ctx.trade.state,
+      },
+      'sol_escrow_sent',
+      solEscrowSigned
+    );
   };
 
   const startSwapResender = (ctx) => {
@@ -419,6 +549,7 @@ async function main() {
           done = true;
           if (ctx.resender) clearInterval(ctx.resender);
           process.stdout.write(`${JSON.stringify({ type: 'swap_done', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel })}\n`);
+          persistTrade(ctx.tradeId, { state: ctx.trade.state }, 'swap_done', { trade_id: ctx.tradeId });
           maybeExit();
         }
         return;
@@ -444,7 +575,56 @@ async function main() {
           return;
         }
 
-        // Quote "at requested terms" for now (policy comes later).
+        let quoteUsdtAmount = String(msg.body.usdt_amount);
+        if (priceGuard) {
+          const px = await fetchBtcUsdtMedian();
+          if (!px.ok) {
+            if (debug) process.stderr.write(`[maker] skip rfq: price guard ${px.error}\n`);
+            return;
+          }
+
+          const oracleAmount = quoteUsdtAmountFromOracle({
+            btcSats: msg.body.btc_sats,
+            priceUsdtPerBtc: px.median,
+            usdtDecimals: solDecimals,
+            spreadBps: makerSpreadBps,
+          });
+          if (!oracleAmount || oracleAmount === '0') {
+            if (debug) process.stderr.write(`[maker] skip rfq: computed usdt_amount invalid\n`);
+            return;
+          }
+
+          const rfqAmountTrimmed = String(msg.body.usdt_amount || '').trim();
+          const rfqIsOpen = rfqAmountTrimmed === '' || rfqAmountTrimmed === '0';
+
+          if (rfqIsOpen) {
+            quoteUsdtAmount = oracleAmount;
+          } else {
+            const rfqPrice = impliedPriceUsdtPerBtc({
+              btcSats: msg.body.btc_sats,
+              usdtAmount: rfqAmountTrimmed,
+              usdtDecimals: solDecimals,
+            });
+            if (rfqPrice === null || !Number.isFinite(rfqPrice) || rfqPrice <= 0) {
+              // If RFQ cannot be evaluated, fall back to oracle-based quote.
+              quoteUsdtAmount = oracleAmount;
+            } else {
+              const overpayBps = ((rfqPrice / px.median) - 1) * 10_000;
+              if (Number.isFinite(overpayBps) && overpayBps <= makerMaxOverpayBps) {
+                // RFQ price is acceptable for the maker: echo requested terms.
+                quoteUsdtAmount = rfqAmountTrimmed;
+              } else {
+                // Counterquote based on oracle.
+                quoteUsdtAmount = oracleAmount;
+              }
+            }
+          }
+        } else {
+          // If no price guard is enabled, avoid quoting nonsensical "open RFQ" amounts.
+          if (String(quoteUsdtAmount).trim() === '0') return;
+        }
+
+        // Quote at chosen terms.
         const nowSec = Math.floor(Date.now() / 1000);
         const quoteUnsigned = createUnsignedEnvelope({
           v: 1,
@@ -455,7 +635,7 @@ async function main() {
             pair: PAIR.BTC_LN__USDT_SOL,
             direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
             btc_sats: msg.body.btc_sats,
-            usdt_amount: msg.body.usdt_amount,
+            usdt_amount: quoteUsdtAmount,
             ...(runSwap ? { sol_mint: sol.mint.toBase58(), sol_recipient: solRecipient } : {}),
             valid_until_unix: nowSec + quoteValidSec,
           },
@@ -468,7 +648,7 @@ async function main() {
           rfq_id: rfqId,
           trade_id: String(msg.trade_id),
           btc_sats: msg.body.btc_sats,
-          usdt_amount: msg.body.usdt_amount,
+          usdt_amount: quoteUsdtAmount,
           sol_recipient: solRecipient,
           sol_mint: runSwap ? sol.mint.toBase58() : (msg.body?.sol_mint ? String(msg.body.sol_mint).trim() : ''),
         });
@@ -562,6 +742,24 @@ async function main() {
         // Begin swap: send terms and start the resend loop.
         await createAndSendTerms(ctx);
         startSwapResender(ctx);
+
+        persistTrade(
+          tradeId,
+          {
+            role: 'maker',
+            otc_channel: otcChannel,
+            swap_channel: swapChannel,
+            maker_peer: makerPubkey,
+            taker_peer: inviteePubKey,
+            btc_sats: ctx.btcSats,
+            usdt_amount: ctx.usdtAmount,
+            sol_mint: runSwap ? sol.mint.toBase58() : null,
+            sol_recipient: ctx.solRecipient,
+            state: ctx.trade.state,
+          },
+          'swap_started',
+          { trade_id: tradeId, swap_channel: swapChannel }
+        );
       }
     } catch (err) {
       if (debug) process.stderr.write(`[maker] error: ${err?.message ?? String(err)}\n`);

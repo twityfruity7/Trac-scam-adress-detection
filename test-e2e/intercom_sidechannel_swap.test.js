@@ -45,6 +45,7 @@ import {
   getEscrowState,
   withdrawFeesTx,
 } from '../src/solana/lnUsdtEscrowClient.js';
+import { openTradeReceiptsStore } from '../src/receipts/store.js';
 
 const execFileP = promisify(execFile);
 
@@ -354,6 +355,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   // Peers are configured to use this local bootstrapper via --dht-bootstrap.
   const dhtPort = 30000 + crypto.randomInt(0, 10000);
   const dht = DHT.bootstrapper(dhtPort, '127.0.0.1');
+  await dht.ready();
   const dhtBootstrap = `127.0.0.1:${dhtPort}`;
   t.after(async () => {
     try {
@@ -472,6 +474,9 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   const bobStore = `e2e-bob-${runId}`;
   const eveStore = `e2e-eve-${runId}`;
 
+  const aliceReceiptsDb = path.join(repoRoot, 'onchain/receipts', `${aliceStore}.sqlite`);
+  const bobReceiptsDb = path.join(repoRoot, 'onchain/receipts', `${bobStore}.sqlite`);
+
   const aliceKeys = await writePeerKeypair({ storesDir, storeName: aliceStore });
   const bobKeys = await writePeerKeypair({ storesDir, storeName: bobStore });
   await writePeerKeypair({ storesDir, storeName: eveStore });
@@ -505,6 +510,18 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       dhtBootstrap,
       '--msb',
       '0',
+      '--price-oracle',
+      '1',
+      '--price-providers',
+      'static',
+      '--price-static-btc-usdt',
+      '200000',
+      '--price-static-usdt-usd',
+      '1',
+      '--price-static-count',
+      '5',
+      '--price-poll-ms',
+      '200',
       '--sc-bridge',
       '1',
       '--sc-bridge-token',
@@ -543,6 +560,18 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       dhtBootstrap,
       '--msb',
       '0',
+      '--price-oracle',
+      '1',
+      '--price-providers',
+      'static',
+      '--price-static-btc-usdt',
+      '200000',
+      '--price-static-usdt-usd',
+      '1',
+      '--price-static-count',
+      '5',
+      '--price-poll-ms',
+      '200',
       '--sc-bridge',
       '1',
       '--sc-bridge-token',
@@ -663,6 +692,8 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       otcChannel,
       '--once',
       '1',
+      '--receipts-db',
+      aliceReceiptsDb,
       '--run-swap',
       '1',
       '--swap-timeout-sec',
@@ -704,6 +735,8 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       '30',
       '--once',
       '1',
+      '--receipts-db',
+      bobReceiptsDb,
       '--run-swap',
       '1',
       '--swap-timeout-sec',
@@ -752,6 +785,25 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
 
   const afterBal = (await getAccount(connection, clientToken, 'confirmed')).amount;
   assert.equal(afterBal - beforeBal, usdtAmount);
+
+  // Receipts persistence check (local-only, for recovery).
+  const aliceReceipts = openTradeReceiptsStore({ dbPath: aliceReceiptsDb });
+  const bobReceipts = openTradeReceiptsStore({ dbPath: bobReceiptsDb });
+  try {
+    const aTrade = aliceReceipts.getTrade(tradeId);
+    const bTrade = bobReceipts.getTrade(tradeId);
+    assert.ok(aTrade, 'maker receipts missing trade');
+    assert.ok(bTrade, 'taker receipts missing trade');
+    assert.equal(aTrade.swap_channel, swapChannel);
+    assert.equal(bTrade.swap_channel, swapChannel);
+    assert.equal(aTrade.role, 'maker');
+    assert.equal(bTrade.role, 'taker');
+    assert.match(String(aTrade.ln_payment_hash_hex || ''), /^[0-9a-f]{64}$/);
+    assert.match(String(bTrade.ln_payment_hash_hex || ''), /^[0-9a-f]{64}$/);
+  } finally {
+    aliceReceipts.close();
+    bobReceipts.close();
+  }
 
   // Fee withdrawal check.
   const feeBal = (await getAccount(connection, feeCollectorToken, 'confirmed')).amount;

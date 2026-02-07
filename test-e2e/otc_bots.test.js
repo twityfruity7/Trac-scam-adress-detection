@@ -40,7 +40,7 @@ async function connectBridge(sc, label) {
         throw err;
       }
     },
-    { label, tries: 80, delayMs: 250 }
+    { label, tries: 160, delayMs: 250 }
   );
 }
 
@@ -139,6 +139,7 @@ test('e2e: OTC maker/taker bots negotiate and join swap channel (sidechannel inv
   // Local DHT bootstrapper for reliability (avoid public bootstrap nodes).
   const dhtPort = 30000 + crypto.randomInt(0, 10000);
   const dht = DHT.bootstrapper(dhtPort, '127.0.0.1');
+  await dht.ready();
   const dhtBootstrap = `127.0.0.1:${dhtPort}`;
   t.after(async () => {
     try {
@@ -172,6 +173,18 @@ test('e2e: OTC maker/taker bots negotiate and join swap channel (sidechannel inv
       makerStore,
       '--msb',
       '0',
+      '--price-oracle',
+      '1',
+      '--price-providers',
+      'static',
+      '--price-static-btc-usdt',
+      '200000',
+      '--price-static-usdt-usd',
+      '1',
+      '--price-static-count',
+      '5',
+      '--price-poll-ms',
+      '200',
       '--dht-bootstrap',
       dhtBootstrap,
       '--sc-bridge',
@@ -206,6 +219,18 @@ test('e2e: OTC maker/taker bots negotiate and join swap channel (sidechannel inv
       takerStore,
       '--msb',
       '0',
+      '--price-oracle',
+      '1',
+      '--price-providers',
+      'static',
+      '--price-static-btc-usdt',
+      '200000',
+      '--price-static-usdt-usd',
+      '1',
+      '--price-static-count',
+      '5',
+      '--price-poll-ms',
+      '200',
       '--dht-bootstrap',
       dhtBootstrap,
       '--sc-bridge',
@@ -244,6 +269,17 @@ test('e2e: OTC maker/taker bots negotiate and join swap channel (sidechannel inv
   const takerSc = new ScBridgeClient({ url: `ws://127.0.0.1:${takerPort}`, token: takerToken });
   await connectBridge(makerSc, 'maker sc-bridge');
   await connectBridge(takerSc, 'taker sc-bridge');
+
+  // Ensure sidechannels have passed the DHT bootstrap barrier and joined topics.
+  await retry(async () => {
+    const s = await makerSc.stats();
+    if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('maker sidechannel not started');
+  }, { label: 'maker sidechannel started', tries: 200, delayMs: 250 });
+  await retry(async () => {
+    const s = await takerSc.stats();
+    if (s.type !== 'stats' || s.sidechannelStarted !== true) throw new Error('taker sidechannel not started');
+  }, { label: 'taker sidechannel started', tries: 200, delayMs: 250 });
+
   makerSc.close();
   takerSc.close();
 
@@ -302,4 +338,3 @@ test('e2e: OTC maker/taker bots negotiate and join swap channel (sidechannel inv
   assert.ok(Array.isArray(stats.channels));
   assert.ok(stats.channels.includes(swapChannel), `taker peer did not join ${swapChannel}. channels=${JSON.stringify(stats.channels)}`);
 });
-

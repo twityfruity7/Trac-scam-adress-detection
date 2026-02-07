@@ -23,5 +23,8 @@ fi
 
 SC_TOKEN="$(tr -d '\r\n' <"$TOKEN_FILE")"
 
-exec node scripts/otc-maker.mjs --url "ws://127.0.0.1:${SC_PORT}" --token "$SC_TOKEN" "$@"
-
+exec node scripts/otc-maker.mjs \
+  --url "ws://127.0.0.1:${SC_PORT}" \
+  --token "$SC_TOKEN" \
+  --receipts-db "onchain/receipts/${STORE_NAME}.sqlite" \
+  "$@"
