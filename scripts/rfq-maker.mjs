@@ -21,6 +21,7 @@ import { createInitialTrade, applySwapEnvelope } from '../src/swap/stateMachine.
 import { normalizeInvitePayload, normalizeWelcomePayload, createSignedInvite } from '../src/sidechannel/capabilities.js';
 import { normalizeClnNetwork } from '../src/ln/cln.js';
 import { normalizeLndNetwork } from '../src/ln/lnd.js';
+import { decodeBolt11 } from '../src/ln/bolt11.js';
 import { lnInvoice } from '../src/ln/client.js';
 import {
   createEscrowTx,
@@ -180,7 +181,9 @@ async function main() {
   const swapTimeoutSec = parseIntFlag(flags.get('swap-timeout-sec'), 'swap-timeout-sec', 300);
   const swapResendMs = parseIntFlag(flags.get('swap-resend-ms'), 'swap-resend-ms', 1200);
   const termsValidSec = parseIntFlag(flags.get('terms-valid-sec'), 'terms-valid-sec', 300);
-  const solRefundAfterSec = parseIntFlag(flags.get('solana-refund-after-sec'), 'solana-refund-after-sec', 3600);
+  // Default to a long recovery window for the LN payer to claim, but allow overriding for market makers.
+  const solRefundAfterSec = parseIntFlag(flags.get('solana-refund-after-sec'), 'solana-refund-after-sec', 72 * 3600);
+  const lnInvoiceExpirySec = parseIntFlag(flags.get('ln-invoice-expiry-sec'), 'ln-invoice-expiry-sec', 3600);
 
   const solRpcUrl = (flags.get('solana-rpc-url') && String(flags.get('solana-rpc-url')).trim()) || 'http://127.0.0.1:8899';
   const solKeypairPath = flags.get('solana-keypair') ? String(flags.get('solana-keypair')).trim() : '';
@@ -458,6 +461,7 @@ async function main() {
       amountMsat: (BigInt(String(sats)) * 1000n).toString(),
       label: ctx.tradeId,
       description: 'swap',
+      expirySec: lnInvoiceExpirySec,
     });
 
     const bolt11 = String(invoice?.bolt11 || '').trim();
@@ -467,6 +471,7 @@ async function main() {
 
     ctx.paymentHashHex = paymentHashHex;
 
+    const decoded = decodeBolt11(bolt11);
     const lnInvUnsigned = createUnsignedEnvelope({
       v: 1,
       kind: KIND.LN_INVOICE,
@@ -475,6 +480,7 @@ async function main() {
         bolt11,
         payment_hash_hex: paymentHashHex,
         amount_msat: String(BigInt(sats) * 1000n),
+        expires_at_unix: decoded.expires_at_unix,
       },
     });
     const lnInvSigned = await signSwapEnvelope(sc, lnInvUnsigned);

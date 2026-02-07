@@ -179,6 +179,13 @@ async function main() {
   const runSwap = parseBool(flags.get('run-swap'), false);
   const swapTimeoutSec = parseIntFlag(flags.get('swap-timeout-sec'), 'swap-timeout-sec', 300);
   const swapResendMs = parseIntFlag(flags.get('swap-resend-ms'), 'swap-resend-ms', 1200);
+  // Guardrail: require the Solana refund timelock in TERMS to be far enough in the future
+  // to allow recovery (crash/restart/RPC outage) after paying the LN invoice.
+  const minSolRefundWindowSec = parseIntFlag(
+    flags.get('min-solana-refund-window-sec'),
+    'min-solana-refund-window-sec',
+    72 * 3600
+  );
 
   const solRpcUrl = (flags.get('solana-rpc-url') && String(flags.get('solana-rpc-url')).trim()) || 'http://127.0.0.1:8899';
   const solKeypairPath = flags.get('solana-keypair') ? String(flags.get('solana-keypair')).trim() : '';
@@ -486,6 +493,20 @@ async function main() {
     if (solMintStr) {
       const gotMint = String(termsMsg.body?.sol_mint || '');
       if (gotMint !== solMintStr) throw new Error(`terms.sol_mint mismatch (got=${gotMint} want=${solMintStr})`);
+    }
+
+    if (minSolRefundWindowSec !== null) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const refundAfterUnix = Number(termsMsg.body?.sol_refund_after_unix);
+      if (!Number.isFinite(refundAfterUnix) || refundAfterUnix <= 0) {
+        throw new Error('terms.sol_refund_after_unix missing/invalid');
+      }
+      const windowSec = refundAfterUnix - nowSec;
+      if (windowSec < minSolRefundWindowSec) {
+        throw new Error(
+          `terms.sol_refund_after_unix too soon (window_sec=${windowSec} min=${minSolRefundWindowSec})`
+        );
+      }
     }
 
     const termsHash = hashUnsignedEnvelope(stripSignature(termsMsg));

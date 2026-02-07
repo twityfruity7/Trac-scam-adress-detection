@@ -59,8 +59,9 @@ export function verifySwapPrePay({ terms, invoiceBody, escrowBody, now_unix = nu
     const now = Number(now_unix);
     if (!Number.isFinite(now) || now <= 0) return { ok: false, error: 'now_unix must be a unix seconds number', decoded_invoice: inv.decoded };
 
-    if (invoiceBody.expires_at_unix !== undefined && invoiceBody.expires_at_unix !== null) {
-      if (now >= Number(invoiceBody.expires_at_unix)) {
+    const invoiceExpiresAt = invoiceBody.expires_at_unix ?? inv.decoded?.expires_at_unix ?? null;
+    if (invoiceExpiresAt !== null && invoiceExpiresAt !== undefined) {
+      if (now >= Number(invoiceExpiresAt)) {
         return { ok: false, error: 'invoice already expired', decoded_invoice: inv.decoded };
       }
     }

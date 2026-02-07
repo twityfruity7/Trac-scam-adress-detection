@@ -266,7 +266,8 @@ Prefer `rfqbotmgr` for tool-call operation: stop/restart individual bot instance
 | `--swap-timeout-sec <n>` | Per-swap timeout (default `300`) |
 | `--swap-resend-ms <n>` | Proof resend interval (default `1200`) |
 | `--terms-valid-sec <n>` | Terms validity window (default `300`) |
-| `--solana-refund-after-sec <n>` | Solana refund timelock from terms send time (default `3600`) |
+| `--solana-refund-after-sec <n>` | Solana refund timelock from terms send time (default `259200` = 72h) |
+| `--ln-invoice-expiry-sec <n>` | LN invoice expiry seconds (default `3600`) |
 
 ##### Solana
 
@@ -337,6 +338,7 @@ Prefer `rfqbotmgr` for tool-call operation: stop/restart individual bot instance
 | `--run-swap 0|1` | Execute the full swap state machine (default `0`) |
 | `--swap-timeout-sec <n>` | Per-swap timeout (default `300`) |
 | `--swap-resend-ms <n>` | Proof resend interval (default `1200`) |
+| `--min-solana-refund-window-sec <n>` | Reject TERMS where `sol_refund_after_unix - now` is below this (default `259200` = 72h) |
 
 ##### Solana
 
