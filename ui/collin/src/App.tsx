@@ -103,7 +103,7 @@ function App() {
   const [lnChannelPrivate, setLnChannelPrivate] = useState<boolean>(true);
 
   // Sell USDT: offer announcer (non-binding discovery message).
-  const [offerName, setOfferName] = useState<string>('maker:offer');
+  const [offerName, setOfferName] = useState<string>('');
   const [offerBtcSats, setOfferBtcSats] = useState<number>(10_000);
   const [offerUsdtAtomic, setOfferUsdtAtomic] = useState<string>('1000000'); // 1.000000 USDT
   const [offerMaxPlatformFeeBps, setOfferMaxPlatformFeeBps] = useState<number>(50); // 0.5%
@@ -167,22 +167,54 @@ function App() {
   // when new events arrive (avoid jumpiness).
 
   const filteredScEvents = useMemo(() => {
-    const chan = scFilter.channel.trim();
-    const kind = scFilter.kind.trim();
+    const chan = scFilter.channel.trim().toLowerCase();
+    const kind = scFilter.kind.trim().toLowerCase();
     return scEvents.filter((e) => {
-      if (chan && String(e.channel || '') !== chan) return false;
-      if (kind && String(e.kind || '') !== kind) return false;
+      const c = String(e.channel || '').toLowerCase();
+      const k = String(e.kind || '').toLowerCase();
+      if (chan && !c.includes(chan)) return false;
+      if (kind && !k.includes(kind)) return false;
       return true;
     });
   }, [scEvents, scFilter]);
 
+  const localPeerPubkeyHex = useMemo(() => {
+    try {
+      const scInfo = preflight?.sc_info && typeof preflight.sc_info === 'object' ? (preflight.sc_info as any) : null;
+      const info = scInfo?.info && typeof scInfo.info === 'object' ? scInfo.info : null;
+      const hex = info ? String(info.peerPubkey || '').trim() : '';
+      return hex ? hex.toLowerCase() : '';
+    } catch (_e) {
+      return '';
+    }
+  }, [preflight?.sc_info]);
+
+  const evtSignerHex = (evt: any) => {
+    try {
+      const s = String(evt?.message?.signer || evt?.from || '').trim();
+      return s ? s.toLowerCase() : '';
+    } catch (_e) {
+      return '';
+    }
+  };
+
   const rfqEvents = useMemo(() => {
-    return filteredScEvents.filter((e) => String(e.kind || '') === 'swap.rfq');
-  }, [filteredScEvents]);
+    return filteredScEvents.filter((e) => {
+      if (String(e.kind || '') !== 'swap.rfq') return false;
+      const signer = evtSignerHex(e);
+      if (localPeerPubkeyHex && signer && signer === localPeerPubkeyHex) return false;
+      return true;
+    });
+  }, [filteredScEvents, localPeerPubkeyHex]);
 
   const offerEvents = useMemo(() => {
-    return filteredScEvents.filter((e) => String(e.kind || '') === 'swap.svc_announce');
-  }, [filteredScEvents]);
+    return filteredScEvents.filter((e) => {
+      if (String(e.kind || '') !== 'swap.svc_announce') return false;
+      const signer = evtSignerHex(e);
+      if (localPeerPubkeyHex && signer && signer === localPeerPubkeyHex) return false;
+      return true;
+    });
+  }, [filteredScEvents, localPeerPubkeyHex]);
 
   function finalEventContentJson(e: any) {
     // promptd emits {type:"final", content_json: {...}} (not wrapped).
@@ -285,19 +317,19 @@ function App() {
     const out: any[] = [];
     out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length });
     for (const e of myOfferPosts) out.push({ _t: 'offer', id: `my:${e.svc_announce_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
-    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'Offer Inbox', count: offerEvents.length });
-    for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
-    return out;
-  }, [myOfferPosts, offerEvents]);
-
-  const sellBtcFeedItems = useMemo(() => {
-    const out: any[] = [];
-    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length });
-    for (const e of myRfqPosts) out.push({ _t: 'rfq', id: `my:${e.rfq_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
     out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'RFQ Inbox', count: rfqEvents.length });
     for (const e of rfqEvents) out.push({ _t: 'rfq', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
     return out;
-  }, [myRfqPosts, rfqEvents]);
+  }, [myOfferPosts, rfqEvents]);
+
+  const sellBtcFeedItems = useMemo(() => {
+    const out: any[] = [];
+    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'Offer Inbox', count: offerEvents.length });
+    for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length });
+    for (const e of myRfqPosts) out.push({ _t: 'rfq', id: `my:${e.rfq_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    return out;
+  }, [offerEvents, myRfqPosts]);
 
   function oldestDbId(list: any[]) {
     let min = Number.POSITIVE_INFINITY;
@@ -708,8 +740,14 @@ function App() {
       if (Number.isFinite(maxPlatform)) setRfqMaxPlatformFeeBps(Math.max(0, Math.trunc(maxPlatform)));
       if (Number.isFinite(maxTrade)) setRfqMaxTradeFeeBps(Math.max(0, Math.trunc(maxTrade)));
       if (Number.isFinite(maxTotal)) setRfqMaxTotalFeeBps(Math.max(0, Math.trunc(maxTotal)));
-      if (Number.isFinite(minWin)) setRfqMinSolRefundWindowSec(Math.max(0, Math.trunc(minWin)));
-      if (Number.isFinite(maxWin)) setRfqMaxSolRefundWindowSec(Math.max(0, Math.trunc(maxWin)));
+      const SOL_REFUND_MIN_SEC = 3600;
+      const SOL_REFUND_MAX_SEC = 7 * 24 * 3600;
+      if (Number.isFinite(minWin)) {
+        setRfqMinSolRefundWindowSec(Math.min(SOL_REFUND_MAX_SEC, Math.max(SOL_REFUND_MIN_SEC, Math.trunc(minWin))));
+      }
+      if (Number.isFinite(maxWin)) {
+        setRfqMaxSolRefundWindowSec(Math.min(SOL_REFUND_MAX_SEC, Math.max(SOL_REFUND_MIN_SEC, Math.trunc(maxWin))));
+      }
       setRfqValidUntilUnix(until);
 
       setActiveTab('sell_btc');
@@ -723,8 +761,10 @@ function App() {
     if (offerBusy) return;
     if (!stackGate.ok) return void stackBlockedToast('Post offer');
 
+    const SOL_REFUND_MIN_SEC = 3600; // 1h
+    const SOL_REFUND_MAX_SEC = 7 * 24 * 3600; // 1w
+
     const name = offerName.trim();
-    if (!name) return void pushToast('error', 'Offer name is required');
 
     if (!Number.isInteger(offerBtcSats) || offerBtcSats < 1) return void pushToast('error', 'BTC amount must be >= 1 sat');
     if (!/^[0-9]+$/.test(String(offerUsdtAtomic || '').trim())) return void pushToast('error', 'USDT amount must be a base-unit integer');
@@ -734,6 +774,20 @@ function App() {
     }
     if (offerMinSolRefundWindowSec > offerMaxSolRefundWindowSec) {
       return void pushToast('error', 'Solana refund window invalid: min must be <= max');
+    }
+    if (
+      !Number.isInteger(offerMinSolRefundWindowSec) ||
+      offerMinSolRefundWindowSec < SOL_REFUND_MIN_SEC ||
+      offerMinSolRefundWindowSec > SOL_REFUND_MAX_SEC
+    ) {
+      return void pushToast('error', `Solana refund window invalid: min must be ${SOL_REFUND_MIN_SEC}s..${SOL_REFUND_MAX_SEC}s`);
+    }
+    if (
+      !Number.isInteger(offerMaxSolRefundWindowSec) ||
+      offerMaxSolRefundWindowSec < SOL_REFUND_MIN_SEC ||
+      offerMaxSolRefundWindowSec > SOL_REFUND_MAX_SEC
+    ) {
+      return void pushToast('error', `Solana refund window invalid: max must be ${SOL_REFUND_MIN_SEC}s..${SOL_REFUND_MAX_SEC}s`);
     }
     const nowSec = Math.floor(Date.now() / 1000);
     if (!Number.isInteger(offerValidUntilUnix) || offerValidUntilUnix <= nowSec) {
@@ -747,6 +801,12 @@ function App() {
       .slice(0, 20);
     if (channels.length < 1) return void pushToast('error', 'No rendezvous channels configured');
 
+    const autoName =
+      name ||
+      (localPeerPubkeyHex
+        ? `maker:${localPeerPubkeyHex.slice(0, 8)}`
+        : `maker:${Math.random().toString(16).slice(2, 10)}`);
+
     if (toolRequiresApproval('intercomswap_offer_post') && !autoApprove) {
       const ok = window.confirm(`Post offer now?\n\nchannels: ${channels.join(', ')}\nBTC: ${offerBtcSats} sats\nUSDT: ${offerUsdtAtomic}`);
       if (!ok) return;
@@ -756,7 +816,7 @@ function App() {
     try {
       const args = {
         channels,
-        name,
+        name: autoName,
         rfq_channels: channels,
         valid_until_unix: offerValidUntilUnix,
         offers: [
@@ -790,6 +850,9 @@ function App() {
     if (rfqBusy) return;
     if (!stackGate.ok) return void stackBlockedToast('Post RFQ');
 
+    const SOL_REFUND_MIN_SEC = 3600; // 1h
+    const SOL_REFUND_MAX_SEC = 7 * 24 * 3600; // 1w
+
     const channel = rfqChannel.trim() || scChannels.split(',')[0]?.trim() || '';
     if (!channel) return void pushToast('error', 'RFQ channel is required');
 
@@ -804,6 +867,20 @@ function App() {
     }
     if (rfqMinSolRefundWindowSec > rfqMaxSolRefundWindowSec) {
       return void pushToast('error', 'Solana refund window invalid: min must be <= max');
+    }
+    if (
+      !Number.isInteger(rfqMinSolRefundWindowSec) ||
+      rfqMinSolRefundWindowSec < SOL_REFUND_MIN_SEC ||
+      rfqMinSolRefundWindowSec > SOL_REFUND_MAX_SEC
+    ) {
+      return void pushToast('error', `Solana refund window invalid: min must be ${SOL_REFUND_MIN_SEC}s..${SOL_REFUND_MAX_SEC}s`);
+    }
+    if (
+      !Number.isInteger(rfqMaxSolRefundWindowSec) ||
+      rfqMaxSolRefundWindowSec < SOL_REFUND_MIN_SEC ||
+      rfqMaxSolRefundWindowSec > SOL_REFUND_MAX_SEC
+    ) {
+      return void pushToast('error', `Solana refund window invalid: max must be ${SOL_REFUND_MIN_SEC}s..${SOL_REFUND_MAX_SEC}s`);
     }
     const nowSec = Math.floor(Date.now() / 1000);
     if (!Number.isInteger(rfqValidUntilUnix) || rfqValidUntilUnix <= nowSec) {
@@ -947,14 +1024,59 @@ function App() {
   function summarizeLn(listfunds: any) {
     try {
       if (!listfunds || typeof listfunds !== 'object') return { ok: false, channels: 0 };
+
+      const parseMsat = (v: any): bigint | null => {
+        if (!v) return null;
+        if (typeof v === 'object') {
+          if (typeof (v as any).msat === 'string' || typeof (v as any).msat === 'number') return parseMsat((v as any).msat);
+          if (typeof (v as any).sat === 'string' || typeof (v as any).sat === 'number') {
+            const s = String((v as any).sat).trim();
+            if (!/^[0-9]+$/.test(s)) return null;
+            return BigInt(s) * 1000n;
+          }
+        }
+        const s = String(v).trim();
+        if (!s) return null;
+        const m = s.match(/^([0-9]+)(msat|sat)?$/i);
+        if (!m) return null;
+        const n = BigInt(m[1]);
+        const unit = (m[2] || 'msat').toLowerCase();
+        return unit === 'sat' ? n * 1000n : n;
+      };
+
+      const msatToSatsSafe = (msat: bigint) => {
+        try {
+          const sats = msat / 1000n;
+          const max = BigInt(Number.MAX_SAFE_INTEGER);
+          if (sats > max) return null;
+          return Number(sats);
+        } catch (_e) {
+          return null;
+        }
+      };
+
       // CLN: { channels: [...] }
       if (Array.isArray((listfunds as any).channels)) {
-        return { ok: true, channels: (listfunds as any).channels.length };
+        const outputs = Array.isArray((listfunds as any).outputs) ? (listfunds as any).outputs : [];
+        let walletMsat = 0n;
+        for (const o of outputs) {
+          const msat = parseMsat((o as any)?.amount_msat);
+          if (msat !== null) walletMsat += msat;
+        }
+        return {
+          ok: true,
+          channels: (listfunds as any).channels.length,
+          wallet_sats: msatToSatsSafe(walletMsat),
+        };
       }
       // LND wrapper: { channels: { channels: [...] } }
       const ch = (listfunds as any).channels;
       if (ch && typeof ch === 'object' && Array.isArray(ch.channels)) {
-        return { ok: true, channels: ch.channels.length };
+        const w = (listfunds as any).wallet;
+        const confirmed = w && typeof w === 'object' ? Number.parseInt(String((w as any).confirmed_balance || '0'), 10) : 0;
+        const unconfirmed = w && typeof w === 'object' ? Number.parseInt(String((w as any).unconfirmed_balance || '0'), 10) : 0;
+        const total = Number.isFinite(confirmed + unconfirmed) ? confirmed + unconfirmed : null;
+        return { ok: true, channels: ch.channels.length, wallet_sats: Number.isFinite(total as any) ? (total as any) : null };
       }
       return { ok: true, channels: 0 };
     } catch (_e) {
@@ -1586,6 +1708,17 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Close detail modal via Escape.
+  useEffect(() => {
+    const isModal = selected && selected.type !== 'console_event' && selected.type !== 'prompt_event';
+    if (!isModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelected(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selected]);
+
   // Auto-connect the sidechannel feed once a peer is up. The UI relies on this for RFQ/Offer inboxes.
   useEffect(() => {
     const okPeer = Boolean(preflight?.peer_status?.peers?.some?.((p: any) => Boolean(p?.alive)));
@@ -1661,11 +1794,12 @@ function App() {
   const lnAlias = lnInfoObj ? String((lnInfoObj as any).alias || '').trim() : '';
   const lnNodeId = lnInfoObj ? String((lnInfoObj as any).id || (lnInfoObj as any).identity_pubkey || '').trim() : '';
   const lnNodeIdShort = lnNodeId ? `${lnNodeId.slice(0, 16)}…` : '';
-  const solSignerPubkey = String(preflight?.sol_signer?.pubkey || '').trim();
-  const lnChannelCount = Number(preflight?.ln_summary?.channels || 0);
-  const lnBackend = String(envInfo?.ln?.backend || '');
-  const lnNetwork = String(envInfo?.ln?.network || '');
-  const isLnRegtestDocker = lnBackend === 'docker' && lnNetwork === 'regtest';
+	  const solSignerPubkey = String(preflight?.sol_signer?.pubkey || '').trim();
+	  const lnChannelCount = Number(preflight?.ln_summary?.channels || 0);
+	  const lnWalletSats = typeof (preflight as any)?.ln_summary?.wallet_sats === 'number' ? (preflight as any).ln_summary.wallet_sats : null;
+	  const lnBackend = String(envInfo?.ln?.backend || '');
+	  const lnNetwork = String(envInfo?.ln?.network || '');
+	  const isLnRegtestDocker = lnBackend === 'docker' && lnNetwork === 'regtest';
   const solKind = String(preflight?.env?.solana?.classify?.kind || envInfo?.solana?.classify?.kind || '');
   const solLocalUp = solKind !== 'local' || Boolean(preflight?.sol_local_status?.rpc_listening);
   const solConfigOk = !preflight?.sol_config_error;
@@ -2017,9 +2151,14 @@ function App() {
 
               <div className="field">
                 <div className="field-hd">
-                  <span className="mono">Offer Name</span>
+                  <span className="mono">Label (optional)</span>
                 </div>
-                <input className="input" value={offerName} onChange={(e) => setOfferName(e.target.value)} placeholder="maker:alice" />
+                <input
+                  className="input"
+                  value={offerName}
+                  onChange={(e) => setOfferName(e.target.value)}
+                  placeholder="maker:alice (auto if empty)"
+                />
               </div>
 
               <div className="field">
@@ -2121,7 +2260,57 @@ function App() {
                     if (sec !== null) setOfferValidUntilUnix(sec);
                   }}
                 />
+                <div className="muted small">UTC: <span className="mono">{unixSecToUtcIso(offerValidUntilUnix)}</span></div>
                 <div className="row">
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 5 * 60)}
+                    disabled={offerBusy}
+                  >
+                    +5m
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 10 * 60)}
+                    disabled={offerBusy}
+                  >
+                    +10m
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 30 * 60)}
+                    disabled={offerBusy}
+                  >
+                    +30m
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 3600)}
+                    disabled={offerBusy}
+                  >
+                    +1h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 5 * 3600)}
+                    disabled={offerBusy}
+                  >
+                    +5h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 10 * 3600)}
+                    disabled={offerBusy}
+                  >
+                    +10h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 24 * 3600)}
+                    disabled={offerBusy}
+                  >
+                    +24h
+                  </button>
                   <button
                     className="btn small"
                     onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 72 * 3600)}
@@ -2131,10 +2320,10 @@ function App() {
                   </button>
                   <button
                     className="btn small"
-                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 24 * 3600)}
+                    onClick={() => setOfferValidUntilUnix(Math.floor(Date.now() / 1000) + 7 * 24 * 3600)}
                     disabled={offerBusy}
                   >
-                    +24h
+                    +1w
                   </button>
                 </div>
               </div>
@@ -2150,7 +2339,7 @@ function App() {
               </div>
             </Panel>
 
-            <Panel title="Offers">
+            <Panel title="Activity">
               <VirtualList
                 items={sellUsdtFeedItems}
                 itemKey={(it) => String(it.id || Math.random())}
@@ -2161,14 +2350,22 @@ function App() {
                       <span className="mono">{it.title}</span>
                       <span className="mono dim">{typeof it.count === 'number' ? it.count : ''}</span>
                     </div>
+                  ) : it._t === 'offer' ? (
+                    <OfferRow
+                      evt={it.evt}
+                      badge={it.badge || ''}
+                      showRespond={false}
+                      onSelect={() => setSelected({ type: it.badge ? 'offer_posted' : 'offer', evt: it.evt })}
+                      onRespond={() => {}}
+                    />
                   ) : (
-	                    <OfferRow
-	                      evt={it.evt}
-	                      badge={it.badge || ''}
-	                      showRespond={!it.badge}
-	                      onSelect={() => setSelected({ type: it.badge ? 'offer_posted' : 'offer', evt: it.evt })}
-	                      onRespond={() => adoptOfferIntoRfqDraft(it.evt)}
-	                    />
+                    <RfqRow
+                      evt={it.evt}
+                      badge={it.badge || ''}
+                      showQuote={false}
+                      onSelect={() => setSelected({ type: it.badge ? 'rfq_posted' : 'rfq', evt: it.evt })}
+                      onQuote={() => {}}
+                    />
                   )
                 }
               />
@@ -2298,7 +2495,57 @@ function App() {
                     if (sec !== null) setRfqValidUntilUnix(sec);
                   }}
                 />
+                <div className="muted small">UTC: <span className="mono">{unixSecToUtcIso(rfqValidUntilUnix)}</span></div>
                 <div className="row">
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 5 * 60)}
+                    disabled={rfqBusy}
+                  >
+                    +5m
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 10 * 60)}
+                    disabled={rfqBusy}
+                  >
+                    +10m
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 30 * 60)}
+                    disabled={rfqBusy}
+                  >
+                    +30m
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 3600)}
+                    disabled={rfqBusy}
+                  >
+                    +1h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 5 * 3600)}
+                    disabled={rfqBusy}
+                  >
+                    +5h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 10 * 3600)}
+                    disabled={rfqBusy}
+                  >
+                    +10h
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 24 * 3600)}
+                    disabled={rfqBusy}
+                  >
+                    +24h
+                  </button>
                   <button
                     className="btn small"
                     onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 72 * 3600)}
@@ -2308,10 +2555,10 @@ function App() {
                   </button>
                   <button
                     className="btn small"
-                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 24 * 3600)}
+                    onClick={() => setRfqValidUntilUnix(Math.floor(Date.now() / 1000) + 7 * 24 * 3600)}
                     disabled={rfqBusy}
                   >
-                    +24h
+                    +1w
                   </button>
                 </div>
               </div>
@@ -2327,7 +2574,7 @@ function App() {
               </div>
             </Panel>
 
-            <Panel title="RFQs">
+            <Panel title="Activity">
               <VirtualList
                 items={sellBtcFeedItems}
                 itemKey={(it) => String(it.id || Math.random())}
@@ -2338,6 +2585,14 @@ function App() {
                       <span className="mono">{it.title}</span>
                       <span className="mono dim">{typeof it.count === 'number' ? it.count : ''}</span>
                     </div>
+                  ) : it._t === 'offer' ? (
+                    <OfferRow
+                      evt={it.evt}
+                      badge={it.badge || ''}
+                      showRespond={!it.badge}
+                      onSelect={() => setSelected({ type: it.badge ? 'offer_posted' : 'offer', evt: it.evt })}
+                      onRespond={() => adoptOfferIntoRfqDraft(it.evt)}
+                    />
                   ) : (
                     <RfqRow
                       evt={it.evt}
@@ -2771,19 +3026,33 @@ function App() {
                 node: <span className="mono">{lnAlias || '—'}</span> · id:{' '}
                 <span className="mono">{lnNodeIdShort || '—'}</span>
               </div>
-	              <div className="row">
-	                {lnChannelCount > 0 ? <span className="chip hi">{lnChannelCount} channel(s)</span> : <span className="chip warn">no channels</span>}
-	              </div>
+		              <div className="row">
+		                {lnChannelCount > 0 ? <span className="chip hi">{lnChannelCount} channel(s)</span> : <span className="chip warn">no channels</span>}
+		                {lnWalletSats !== null ? <span className="chip">{lnWalletSats} sats</span> : null}
+		                <button className="btn small" onClick={() => void refreshPreflight()} disabled={preflightBusy}>
+		                  Refresh BTC
+		                </button>
+		              </div>
 
-	              {isLnRegtestDocker ? (
-	                <button
-	                  className="btn primary"
-	                  disabled={runBusy || (lnChannelCount > 0 && !preflight?.ln_listfunds_error)}
-	                  onClick={() => void ensureLnRegtestChannel()}
-	                >
-	                  {lnChannelCount > 0 ? 'Regtest channel ready' : 'Bootstrap regtest (mine+fund+open)'}
-	                </button>
-	              ) : null}
+		              {isLnRegtestDocker ? (
+		                <button
+		                  className="btn primary"
+		                  disabled={runBusy}
+		                  onClick={() => {
+		                    if (lnChannelCount > 0 && !preflight?.ln_listfunds_error) {
+		                      setSelected({ type: 'ln_listfunds', evt: preflight?.ln_listfunds || null });
+		                      return;
+		                    }
+		                    void ensureLnRegtestChannel();
+		                  }}
+		                >
+		                  {lnChannelCount > 0 ? 'Regtest channel ready (details)' : 'Bootstrap regtest (mine+fund+open)'}
+		                </button>
+		              ) : null}
+
+		              <div className="muted small">
+		                Channel selection: when paying invoices, Lightning routes automatically across your open channels.
+		              </div>
 
               <div className="field">
                 <div className="field-hd">
@@ -3175,8 +3444,39 @@ function App() {
               </details>
             </Panel>
           </div>
-        ) : null}
+      ) : null}
       </main>
+
+      {selected && selected.type !== 'console_event' && selected.type !== 'prompt_event' ? (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onMouseDown={() => setSelected(null)}
+        >
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-hd">
+              <div className="mono">
+                {selected?.type || 'detail'}
+              </div>
+              <div className="row">
+                <button
+                  className="btn small"
+                  onClick={() => copyToClipboard('json', JSON.stringify(selected, null, 2))}
+                >
+                  Copy JSON
+                </button>
+                <button className="iconbtn" onClick={() => setSelected(null)} aria-label="Close">
+                  ×
+                </button>
+              </div>
+            </div>
+            <div className="modal-bd">
+              <pre className="code" style={{ maxHeight: '60vh' }}>{JSON.stringify(selected, null, 2)}</pre>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (
@@ -3351,6 +3651,20 @@ function secToHuman(sec: number) {
   if (sec % 3600 === 0) return `${sec / 3600}h`;
   if (sec % 60 === 0) return `${sec / 60}m`;
   return `${sec}s`;
+}
+
+function msToUtcIso(ms: number) {
+  if (!Number.isFinite(ms) || ms < 1) return '';
+  try {
+    return new Date(Math.trunc(ms)).toISOString();
+  } catch (_e) {
+    return '';
+  }
+}
+
+function unixSecToUtcIso(sec: number) {
+  if (!Number.isFinite(sec) || sec < 1) return '';
+  return msToUtcIso(Math.trunc(sec) * 1000);
 }
 
 function pad2(n: number) {
@@ -4201,6 +4515,7 @@ function RfqRow({
   badge?: string;
 }) {
   const body = evt?.message?.body;
+  const postedIso = typeof evt?.ts === 'number' ? msToUtcIso(evt.ts) : '';
   const direction = typeof body?.direction === 'string' ? body.direction : '';
   const btcSats = typeof body?.btc_sats === 'number' ? body.btc_sats : null;
   const usdtAtomic = typeof body?.usdt_amount === 'string' ? body.usdt_amount : '';
@@ -4210,6 +4525,7 @@ function RfqRow({
   const minWin = body?.min_sol_refund_window_sec;
   const maxWin = body?.max_sol_refund_window_sec;
   const validUntil = body?.valid_until_unix;
+  const validUntilIso = typeof validUntil === 'number' ? unixSecToUtcIso(validUntil) : '';
   const directionHint =
     direction === 'BTC_LN->USDT_SOL'
       ? 'give BTC (Lightning), receive USDT (Solana)'
@@ -4219,6 +4535,7 @@ function RfqRow({
   return (
     <div className="rowitem" role="button" onClick={onSelect}>
       <div className="rowitem-top">
+        {postedIso ? <span className="mono dim">{postedIso}</span> : null}
         <span className="mono chip">{evt.channel}</span>
         {badge ? <span className="mono chip hi">{badge}</span> : null}
         <span className="mono dim">{evt.trade_id || evt?.message?.trade_id || ''}</span>
@@ -4243,7 +4560,7 @@ function RfqRow({
           {typeof maxWin === 'number' ? `${secToHuman(maxWin)} (${maxWin}s)` : '?'}
         </span>
         <span className="mono">
-          valid_until: {validUntil ?? '?'}
+          expires: {validUntilIso || '?'}{typeof validUntil === 'number' ? ` (${validUntil})` : ''}
         </span>
       </div>
       <div className="rowitem-bot">
@@ -4277,6 +4594,7 @@ function OfferRow({
   badge?: string;
 }) {
   const body = evt?.message?.body;
+  const postedIso = typeof evt?.ts === 'number' ? msToUtcIso(evt.ts) : '';
   const name = typeof body?.name === 'string' ? body.name : '';
   const offers = Array.isArray(body?.offers) ? body.offers : [];
   const o = offers[0] && typeof offers[0] === 'object' ? offers[0] : {};
@@ -4291,6 +4609,7 @@ function OfferRow({
   const minWin = o?.min_sol_refund_window_sec;
   const maxWin = o?.max_sol_refund_window_sec;
   const validUntil = body?.valid_until_unix;
+  const validUntilIso = typeof validUntil === 'number' ? unixSecToUtcIso(validUntil) : '';
   const rfqChans = Array.isArray(body?.rfq_channels) ? body.rfq_channels.map((c: any) => String(c || '').trim()).filter(Boolean) : [];
 
   const hint =
@@ -4303,6 +4622,7 @@ function OfferRow({
   return (
     <div className="rowitem" role="button" onClick={onSelect}>
       <div className="rowitem-top">
+        {postedIso ? <span className="mono dim">{postedIso}</span> : null}
         <span className="mono chip">{evt.channel}</span>
         {badge ? <span className="mono chip hi">{badge}</span> : null}
         {name ? <span className="mono dim">{name}</span> : null}
@@ -4328,7 +4648,9 @@ function OfferRow({
         <span className="mono">
           rfq_channels: {rfqChans.length > 0 ? rfqChans.join(', ') : '?'}
         </span>
-        <span className="mono">valid_until: {validUntil ?? '?'}</span>
+        <span className="mono">
+          expires: {validUntilIso || '?'}{typeof validUntil === 'number' ? ` (${validUntil})` : ''}
+        </span>
       </div>
       <div className="rowitem-bot">
         {showRespond ? (
@@ -4384,7 +4706,7 @@ function TradeRow({
   const id = String(trade?.trade_id || '').trim();
   const state = String(trade?.state || '').trim();
   const role = String(trade?.role || '').trim();
-  const updated = typeof trade?.updated_at === 'number' ? new Date(trade.updated_at).toLocaleString() : '';
+  const updated = typeof trade?.updated_at === 'number' ? msToUtcIso(trade.updated_at) : '';
   const sats = typeof trade?.btc_sats === 'number' ? trade.btc_sats : null;
   const usdtAtomic = typeof trade?.usdt_amount === 'string' ? trade.usdt_amount : '';
   const swapChannel = String(trade?.swap_channel || '').trim();

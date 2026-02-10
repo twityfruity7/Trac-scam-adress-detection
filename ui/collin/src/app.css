@@ -632,6 +632,40 @@
   border-color: rgba(244, 63, 94, 0.38);
 }
 
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(0, 0, 0, 0.68);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.modal {
+  width: min(980px, calc(100vw - 36px));
+  max-height: min(82vh, 780px);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: rgba(10, 14, 22, 0.92);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-hd {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.modal-bd {
+  padding: 12px;
+  overflow: auto;
+}
+
 .toolhelp {
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
