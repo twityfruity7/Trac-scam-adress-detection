@@ -3761,6 +3761,61 @@ export class ToolExecutor {
       if (dryRun) return { type: 'dry_run', tool: toolName };
       return lnPay(this.ln, { bolt11 });
     }
+    if (toolName === 'intercomswap_ln_rebalance_selfpay') {
+      assertAllowedKeys(args, toolName, ['amount_sats', 'fee_limit_sat', 'outgoing_chan_id', 'last_hop_pubkey', 'expiry_sec']);
+      requireApproval(toolName, autoApprove);
+      const amountSats = expectInt(args, toolName, 'amount_sats', { min: 1, max: 21_000_000 * 100_000_000 });
+      const feeLimitSat = expectOptionalInt(args, toolName, 'fee_limit_sat', { min: 0, max: 10_000_000 });
+      const outgoingChanId = 'outgoing_chan_id' in args
+        ? expectString(args, toolName, 'outgoing_chan_id', { min: 1, max: 32, pattern: /^[0-9]+$/ })
+        : null;
+      const lastHopPubkey = 'last_hop_pubkey' in args
+        ? normalizeHex33(expectString(args, toolName, 'last_hop_pubkey', { min: 66, max: 66 }), 'last_hop_pubkey')
+        : null;
+      const expirySec = expectOptionalInt(args, toolName, 'expiry_sec', { min: 60, max: 60 * 60 * 24 * 7 });
+      if (dryRun) {
+        return {
+          type: 'dry_run',
+          tool: toolName,
+          amount_sats: amountSats,
+          fee_limit_sat: feeLimitSat,
+          outgoing_chan_id: outgoingChanId,
+          last_hop_pubkey: lastHopPubkey,
+          expiry_sec: expirySec,
+        };
+      }
+      const ts = Date.now();
+      const amountMsat = (BigInt(String(amountSats)) * 1000n).toString();
+      const label = `rebalance-${ts}-${Math.random().toString(16).slice(2, 10)}`.slice(0, 120);
+      const description = `intercomswap inbound rebalance ${amountSats} sats`;
+      const invoice = await lnInvoice(this.ln, { amountMsat, label, description, expirySec });
+      const bolt11 = String(invoice?.bolt11 || '').trim();
+      const paymentHashHex = normalizeHex32(String(invoice?.payment_hash || ''), 'payment_hash');
+      if (!bolt11) throw new Error(`${toolName}: failed to create invoice`);
+      const paid = await lnPay(this.ln, {
+        bolt11,
+        allowSelfPayment: true,
+        feeLimitSat,
+        outgoingChanId,
+        lastHopPubkey,
+      });
+      const preimageHex = normalizeHex32(String(paid?.payment_preimage || ''), 'payment_preimage');
+      return {
+        type: 'ln_rebalance_selfpay',
+        amount_sats: amountSats,
+        payment_hash_hex: paymentHashHex,
+        preimage_hex: preimageHex,
+        label,
+        invoice: {
+          bolt11,
+          payment_hash: paymentHashHex,
+        },
+        notes: [
+          'Best-effort rebalance completed.',
+          'Inbound/outbound distribution depends on route selection and available channels.',
+        ],
+      };
+    }
     if (toolName === 'intercomswap_ln_pay_status') {
       assertAllowedKeys(args, toolName, ['payment_hash_hex']);
       const paymentHashHex = normalizeHex32(expectString(args, toolName, 'payment_hash_hex', { min: 64, max: 64 }), 'payment_hash_hex');

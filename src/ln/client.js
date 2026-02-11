@@ -421,12 +421,39 @@ export async function lnDecodePay(opts, { bolt11 }) {
   return lnClnCli({ ...opts, args: ['decodepay', inv] });
 }
 
-export async function lnPay(opts, { bolt11 }) {
+export async function lnPay(
+  opts,
+  {
+    bolt11,
+    allowSelfPayment = false,
+    feeLimitSat = null,
+    outgoingChanId = null,
+    lastHopPubkey = null,
+  } = {}
+) {
   const inv = String(bolt11 || '').trim();
   if (!inv) throw new Error('Missing bolt11');
 
   if (opts.impl === 'lnd') {
-    const r = await lnLndCli({ ...opts, args: ['payinvoice', '--force', '--json', inv] });
+    const args = ['payinvoice', '--force', '--json'];
+    if (allowSelfPayment) args.push('--allow_self_payment');
+    if (feeLimitSat !== null && feeLimitSat !== undefined) {
+      const n = Number(feeLimitSat);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) throw new Error('Invalid feeLimitSat');
+      args.push('--fee_limit_sat', String(n));
+    }
+    if (outgoingChanId !== null && outgoingChanId !== undefined) {
+      const s = String(outgoingChanId).trim();
+      if (!/^[0-9]+$/.test(s)) throw new Error('Invalid outgoingChanId (expected numeric chan_id)');
+      args.push('--outgoing_chan_id', s);
+    }
+    if (lastHopPubkey !== null && lastHopPubkey !== undefined) {
+      const s = String(lastHopPubkey).trim().toLowerCase();
+      if (!/^[0-9a-f]{66}$/i.test(s)) throw new Error('Invalid lastHopPubkey (expected hex33)');
+      args.push('--last_hop', s);
+    }
+    args.push(inv);
+    const r = await lnLndCli({ ...opts, args });
     const preimageHex =
       decodeMaybeB64Hex(r?.payment_preimage) ||
       decodeMaybeB64Hex(r?.paymentPreimage) ||
@@ -436,6 +463,10 @@ export async function lnPay(opts, { bolt11 }) {
     return { payment_preimage: preimageHex, raw: r };
   }
 
+  if (allowSelfPayment) {
+    // No reliable cross-version CLN equivalent for explicit self-pay routing in this tool path.
+    // We still attempt a normal pay below.
+  }
   const r = await lnClnCli({ ...opts, args: ['pay', inv] });
   const preimageHex = String(r?.payment_preimage || '').trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(preimageHex)) throw new Error('CLN pay missing payment_preimage');

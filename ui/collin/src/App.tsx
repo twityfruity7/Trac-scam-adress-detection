@@ -336,6 +336,9 @@ function App() {
   const [lnWithdrawTo, setLnWithdrawTo] = useState<string>('');
   const [lnWithdrawAmountSats, setLnWithdrawAmountSats] = useState<number | null>(null);
   const [lnWithdrawSatPerVbyte, setLnWithdrawSatPerVbyte] = useState<number>(2);
+  const [lnRebalanceAmountSats, setLnRebalanceAmountSats] = useState<number>(10_000);
+  const [lnRebalanceFeeLimitSat, setLnRebalanceFeeLimitSat] = useState<number>(50);
+  const [lnRebalanceOutgoingChanId, setLnRebalanceOutgoingChanId] = useState<string>('');
 
   const [solSendTo, setSolSendTo] = useState<string>('');
   const [solSendLamports, setSolSendLamports] = useState<string | null>(null);
@@ -509,6 +512,17 @@ function App() {
     if (id) setLnSpliceChannelId(id);
   }, [preflight?.ln_summary?.channel_rows, lnSpliceChannelId]);
 
+  useEffect(() => {
+    // For self-rebalance helper (LND), prefill a numeric chan_id if available.
+    if (lnRebalanceOutgoingChanId.trim()) return;
+    const rows = Array.isArray((preflight as any)?.ln_summary?.channel_rows) ? (preflight as any).ln_summary.channel_rows : [];
+    const next =
+      rows.find((r: any) => Boolean(r?.active) && /^[0-9]+$/.test(String(r?.chan_id || '').trim())) ||
+      rows.find((r: any) => /^[0-9]+$/.test(String(r?.chan_id || '').trim()));
+    const id = String(next?.chan_id || '').trim();
+    if (id) setLnRebalanceOutgoingChanId(id);
+  }, [preflight?.ln_summary?.channel_rows, lnRebalanceOutgoingChanId]);
+
   // Stack observer: lightweight operator signal when a previously-ready stack degrades.
   const stackOkRef = useRef<boolean | null>(null);
   const [stackLastOkTs, setStackLastOkTs] = useState<number | null>(null);
@@ -565,6 +579,13 @@ function App() {
       return true;
     }
   });
+  const [sellBtcQuotesOpen, setSellBtcQuotesOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_sell_btc_quotes_open') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
   const [sellBtcMyOpen, setSellBtcMyOpen] = useState<boolean>(() => {
     try {
       return String(window.localStorage.getItem('collin_sell_btc_my_open') || '1') !== '0';
@@ -577,6 +598,34 @@ function App() {
       return String(window.localStorage.getItem('collin_known_channels_open') || '') === '1';
     } catch (_e) {
       return false;
+    }
+  });
+  const [autoAcceptQuotes, setAutoAcceptQuotes] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_auto_accept_quotes') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [autoJoinSwapInvites, setAutoJoinSwapInvites] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_auto_join_swap_invites') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [autoQuoteFromOffers, setAutoQuoteFromOffers] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_auto_quote_from_offers') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [autoInviteFromAccepts, setAutoInviteFromAccepts] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_auto_invite_from_accepts') || '1') !== '0';
+    } catch (_e) {
+      return true;
     }
   });
   useEffect(() => {
@@ -596,6 +645,11 @@ function App() {
   }, [sellBtcInboxOpen]);
   useEffect(() => {
     try {
+      window.localStorage.setItem('collin_sell_btc_quotes_open', sellBtcQuotesOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [sellBtcQuotesOpen]);
+  useEffect(() => {
+    try {
       window.localStorage.setItem('collin_sell_btc_my_open', sellBtcMyOpen ? '1' : '0');
     } catch (_e) {}
   }, [sellBtcMyOpen]);
@@ -604,6 +658,14 @@ function App() {
       window.localStorage.setItem('collin_known_channels_open', knownChannelsOpen ? '1' : '0');
     } catch (_e) {}
   }, [knownChannelsOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_auto_accept_quotes', autoAcceptQuotes ? '1' : '0');
+      window.localStorage.setItem('collin_auto_join_swap_invites', autoJoinSwapInvites ? '1' : '0');
+      window.localStorage.setItem('collin_auto_quote_from_offers', autoQuoteFromOffers ? '1' : '0');
+      window.localStorage.setItem('collin_auto_invite_from_accepts', autoInviteFromAccepts ? '1' : '0');
+    } catch (_e) {}
+  }, [autoAcceptQuotes, autoJoinSwapInvites, autoQuoteFromOffers, autoInviteFromAccepts]);
 
   const [leaveChannel, setLeaveChannel] = useState<string>('');
   const [leaveBusy, setLeaveBusy] = useState(false);
@@ -964,6 +1026,88 @@ function App() {
     return out;
   }, [promptEvents, scEvents, localPeerPubkeyHex]);
 
+  const myRfqTradeIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const e of myRfqPosts) {
+      const tradeId = String((e as any)?.trade_id || (e as any)?.message?.trade_id || '').trim();
+      if (tradeId) out.add(tradeId);
+    }
+    return out;
+  }, [myRfqPosts]);
+
+  const myRfqIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const e of myRfqPosts) {
+      const rfqId = String((e as any)?.rfq_id || '').trim().toLowerCase();
+      if (/^[0-9a-f]{64}$/i.test(rfqId)) out.add(rfqId);
+    }
+    return out;
+  }, [myRfqPosts]);
+
+  const quoteEvents = useMemo(() => {
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (const e of filteredScEvents) {
+      try {
+        const kind = String((e as any)?.kind || (e as any)?.message?.kind || '').trim();
+        if (kind !== 'swap.quote') continue;
+        const signer = evtSignerHex(e);
+        if (localPeerPubkeyHex && signer && signer === localPeerPubkeyHex) continue;
+        const msg = (e as any)?.message;
+        const body = msg?.body && typeof msg.body === 'object' ? msg.body : {};
+        const tradeId = String((e as any)?.trade_id || msg?.trade_id || '').trim();
+        const rfqId = String(body?.rfq_id || '').trim().toLowerCase();
+        const isMine = (tradeId && myRfqTradeIds.has(tradeId)) || (/^[0-9a-f]{64}$/i.test(rfqId) && myRfqIds.has(rfqId));
+        if (!isMine) continue;
+        const sig = String(msg?.sig || '').trim().toLowerCase();
+        const key = sig || `${tradeId}|${String((e as any)?.db_id || (e as any)?.seq || (e as any)?.ts || '')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(e);
+      } catch (_e) {}
+    }
+    out.sort((a, b) => Number((b as any)?.ts || 0) - Number((a as any)?.ts || 0));
+    return out;
+  }, [filteredScEvents, localPeerPubkeyHex, myRfqTradeIds, myRfqIds]);
+
+  const myQuotePosts = useMemo(() => {
+    const out: Array<{ quote_id: string; channel: string; trade_id: string; ts: number; envelope: any }> = [];
+    const seen = new Set<string>();
+    for (const e of promptEvents) {
+      try {
+        const cj = finalEventContentJson(e);
+        const tr = toolEventResultJson(e);
+        const obj =
+          cj && String((cj as any).type || '') === 'quote_posted'
+            ? cj
+            : tr && String((tr as any).type || '') === 'quote_posted'
+              ? tr
+              : null;
+        if (!obj || typeof obj !== 'object') continue;
+        const quoteId = String((obj as any).quote_id || '').trim().toLowerCase();
+        const env = (obj as any).envelope;
+        if (!/^[0-9a-f]{64}$/i.test(quoteId) || !env || typeof env !== 'object') continue;
+        if (seen.has(quoteId)) continue;
+        seen.add(quoteId);
+        out.push({
+          quote_id: quoteId,
+          channel: String((obj as any).channel || '').trim(),
+          trade_id: String(env?.trade_id || '').trim(),
+          ts: typeof env?.ts === 'number' ? env.ts : typeof (e as any)?.ts === 'number' ? (e as any).ts : Date.now(),
+          envelope: env,
+        });
+      } catch (_e) {}
+    }
+    out.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+    return out;
+  }, [promptEvents]);
+
+  const myQuoteById = useMemo(() => {
+    const out = new Map<string, { quote_id: string; channel: string; trade_id: string; ts: number; envelope: any }>();
+    for (const q of myQuotePosts) out.set(q.quote_id, q);
+    return out;
+  }, [myQuotePosts]);
+
   const joinedChannels = useMemo(() => {
     try {
       const chans = Array.isArray(preflight?.sc_stats?.channels) ? (preflight.sc_stats.channels as any[]) : [];
@@ -1065,6 +1209,11 @@ function App() {
     return set;
   }, [scChannels]);
 
+  const autoAcceptedQuoteSigRef = useRef<Set<string>>(new Set());
+  const autoQuotedRfqSigRef = useRef<Set<string>>(new Set());
+  const autoInvitedAcceptSigRef = useRef<Set<string>>(new Set());
+  const autoJoinedInviteSigRef = useRef<Set<string>>(new Set());
+
   // Auto-hygiene:
   // - If a swap invite expires OR the trade hits a terminal state (claimed/refunded/canceled),
   //   and we're still joined to its swap:* channel, leave automatically.
@@ -1148,6 +1297,176 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [health?.ok, scEvents, uiNowMs, dismissedInviteTradeIds, terminalTradeIdsSet, joinedChannelsSet]);
 
+  useEffect(() => {
+    if (!health?.ok || !autoQuoteFromOffers) return;
+    const tradeFeeCollector = String((preflight as any)?.sol_signer?.pubkey || '').trim();
+    if (!tradeFeeCollector) return;
+    let cancelled = false;
+    void (async () => {
+      // Oldest first keeps sequence stable when multiple RFQs are waiting.
+      const queue = [...rfqEvents].reverse();
+      for (const rfqEvt of queue) {
+        if (cancelled) return;
+        const sig = String((rfqEvt as any)?.message?.sig || '').trim().toLowerCase();
+        if (!sig || autoQuotedRfqSigRef.current.has(sig)) continue;
+        const match = matchOfferForRfq(rfqEvt);
+        if (!match) continue;
+        autoQuotedRfqSigRef.current.add(sig);
+        try {
+          const channel = String((rfqEvt as any)?.channel || '').trim();
+          if (!channel) continue;
+          const nowSec = Math.floor(Date.now() / 1000);
+          const rfqUntil = toIntOrNull((rfqEvt as any)?.message?.body?.valid_until_unix);
+          const validForSec =
+            rfqUntil !== null && rfqUntil > nowSec ? Math.max(30, Math.min(600, rfqUntil - nowSec)) : 300;
+          const out = await runToolFinal(
+            'intercomswap_quote_post_from_rfq',
+            {
+              channel,
+              rfq_envelope: (rfqEvt as any)?.message,
+              trade_fee_collector: tradeFeeCollector,
+              sol_refund_window_sec: match.solRefundWindowSec,
+              valid_for_sec: validForSec,
+            },
+            { auto_approve: true }
+          );
+          const cj = out?.content_json;
+          if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'error') {
+            throw new Error(String((cj as any).error || 'quote_post_from_rfq failed'));
+          }
+          const quoteId = String((cj as any)?.quote_id || '').trim();
+          pushToast('success', `Auto-quoted RFQ${quoteId ? ` (${quoteId.slice(0, 12)}…)` : ''}`);
+        } catch (err: any) {
+          pushToast('error', `Auto-quote failed: ${err?.message || String(err)}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health?.ok, autoQuoteFromOffers, rfqEvents, myOfferPosts, preflight?.sol_signer?.pubkey]);
+
+  useEffect(() => {
+    if (!health?.ok || !autoAcceptQuotes) return;
+    let cancelled = false;
+    void (async () => {
+      const queue = [...quoteEvents].reverse();
+      for (const quoteEvt of queue) {
+        if (cancelled) return;
+        const sig = String((quoteEvt as any)?.message?.sig || '').trim().toLowerCase();
+        if (!sig || autoAcceptedQuoteSigRef.current.has(sig)) continue;
+        autoAcceptedQuoteSigRef.current.add(sig);
+        try {
+          const out = await acceptQuoteEnvelope(quoteEvt, { origin: 'auto' });
+          const quoteId = String((out as any)?.quote_id || '').trim();
+          pushToast('success', `Auto-accepted quote${quoteId ? ` (${quoteId.slice(0, 12)}…)` : ''}`);
+        } catch (err: any) {
+          pushToast('error', `Auto-accept failed: ${err?.message || String(err)}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health?.ok, autoAcceptQuotes, quoteEvents, lnLiquidityMode]);
+
+  useEffect(() => {
+    if (!health?.ok || !autoInviteFromAccepts) return;
+    let cancelled = false;
+    void (async () => {
+      const accepts = [...scEvents].reverse();
+      for (const e of accepts) {
+        if (cancelled) return;
+        try {
+          const kind = String((e as any)?.kind || '').trim();
+          if (kind !== 'swap.quote_accept') continue;
+          const msg = (e as any)?.message;
+          const sig = String(msg?.sig || '').trim().toLowerCase();
+          if (!sig || autoInvitedAcceptSigRef.current.has(sig)) continue;
+          const quoteId = String(msg?.body?.quote_id || '').trim().toLowerCase();
+          if (!/^[0-9a-f]{64}$/i.test(quoteId)) continue;
+          const myQuote = myQuoteById.get(quoteId);
+          if (!myQuote) continue;
+          autoInvitedAcceptSigRef.current.add(sig);
+          const tradeId = String(msg?.trade_id || '').trim();
+          const welcomeText = String(tradeId ? `Welcome to ${tradeId}` : 'Welcome to swap').slice(0, 500);
+          const out = await runToolFinal(
+            'intercomswap_swap_invite_from_accept',
+            {
+              channel: String((e as any)?.channel || myQuote.channel || '').trim(),
+              accept_envelope: msg,
+              quote_envelope: myQuote.envelope,
+              welcome_text: welcomeText,
+              ttl_sec: 3600,
+            },
+            { auto_approve: true }
+          );
+          const cj = out?.content_json;
+          if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'error') {
+            throw new Error(String((cj as any).error || 'swap_invite_from_accept failed'));
+          }
+          const swapChannel = String((cj as any)?.swap_channel || '').trim();
+          pushToast('success', `Auto-invite sent${swapChannel ? ` (${swapChannel})` : ''}`);
+        } catch (err: any) {
+          pushToast('error', `Auto-invite failed: ${err?.message || String(err)}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health?.ok, autoInviteFromAccepts, scEvents, myQuoteById]);
+
+  useEffect(() => {
+    if (!health?.ok || !autoJoinSwapInvites) return;
+    let cancelled = false;
+    void (async () => {
+      const queue = [...inviteEvents].reverse();
+      for (const e of queue) {
+        if (cancelled) return;
+        try {
+          const msg = (e as any)?.message;
+          const sig = String(msg?.sig || '').trim().toLowerCase();
+          if (!sig || autoJoinedInviteSigRef.current.has(sig)) continue;
+          if (Boolean((e as any)?._invite_joined)) continue;
+          if (Boolean((e as any)?._invite_expired) || Boolean((e as any)?._invite_done)) continue;
+
+          const inviteObj = (msg?.body?.invite || null) as any;
+          const invitePayload = inviteObj && typeof inviteObj === 'object' && inviteObj.payload && typeof inviteObj.payload === 'object'
+            ? inviteObj.payload
+            : inviteObj;
+          const inviterFromInvite = String((invitePayload as any)?.inviterPubKey || '').trim().toLowerCase();
+          const inviterFromEnvelope = String(msg?.signer || '').trim().toLowerCase();
+          const resolvedInviter =
+            /^[0-9a-f]{64}$/i.test(inviterFromInvite)
+              ? inviterFromInvite
+              : /^[0-9a-f]{64}$/i.test(inviterFromEnvelope)
+                ? inviterFromEnvelope
+                : '';
+          if (!resolvedInviter) continue;
+
+          autoJoinedInviteSigRef.current.add(sig);
+          await runToolFinal('intercomswap_join_from_swap_invite', { swap_invite_envelope: msg }, { auto_approve: true });
+          const swapCh = String(msg?.body?.swap_channel || '').trim();
+          if (swapCh) watchChannel(swapCh);
+          const tradeId = String(msg?.trade_id || '').trim();
+          if (tradeId) dismissInviteTrade(tradeId);
+          pushToast('success', `Auto-joined swap invite${swapCh ? ` (${swapCh})` : ''}`);
+          void refreshPreflight();
+        } catch (err: any) {
+          pushToast('error', `Auto-join failed: ${err?.message || String(err)}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health?.ok, autoJoinSwapInvites, inviteEvents, joinedChannelsSet, watchedChannelsSet]);
+
   function dismissInviteTrade(tradeIdRaw: string) {
     const tradeId = String(tradeIdRaw || '').trim();
     if (!tradeId) return;
@@ -1196,6 +1515,93 @@ function App() {
     setTimeout(() => void startScStream(), 150);
   }
 
+  function toIntOrNull(v: any): number | null {
+    if (v === null || v === undefined) return null;
+    const n = typeof v === 'number' ? v : Number.parseInt(String(v).trim(), 10);
+    if (!Number.isFinite(n)) return null;
+    return Math.trunc(n);
+  }
+
+  function matchOfferForRfq(rfqEvt: any) {
+    const rfqMsg = rfqEvt?.message;
+    const rfqBody = rfqMsg?.body && typeof rfqMsg.body === 'object' ? rfqMsg.body : null;
+    if (!rfqBody) return null;
+    const rfqBtc = toIntOrNull(rfqBody.btc_sats);
+    const rfqUsdt = String(rfqBody.usdt_amount || '').trim();
+    if (rfqBtc === null || rfqBtc < 1 || !/^[0-9]+$/.test(rfqUsdt)) return null;
+
+    const rfqMaxPlatform = Math.max(0, Math.min(500, toIntOrNull(rfqBody.max_platform_fee_bps) ?? 500));
+    const rfqMaxTrade = Math.max(0, Math.min(1000, toIntOrNull(rfqBody.max_trade_fee_bps) ?? 1000));
+    const rfqMaxTotal = Math.max(0, Math.min(1500, toIntOrNull(rfqBody.max_total_fee_bps) ?? 1500));
+    const rfqMinWin = Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull(rfqBody.min_sol_refund_window_sec) ?? 3600));
+    const rfqMaxWin = Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull(rfqBody.max_sol_refund_window_sec) ?? 7 * 24 * 3600));
+    if (rfqMinWin > rfqMaxWin) return null;
+
+    const rfqChannel = String((rfqEvt as any)?.channel || '').trim();
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const offerEvt of myOfferPosts) {
+      const msg = offerEvt?.message;
+      const body = msg?.body && typeof msg.body === 'object' ? msg.body : null;
+      if (!body) continue;
+
+      const validUntil = toIntOrNull(body.valid_until_unix);
+      if (validUntil !== null && validUntil <= nowSec) continue;
+
+      const rfqChannels = Array.isArray(body.rfq_channels)
+        ? body.rfq_channels.map((c: any) => String(c || '').trim()).filter(Boolean)
+        : [];
+      if (rfqChannels.length > 0 && rfqChannel && !rfqChannels.includes(rfqChannel)) continue;
+
+      const offers = Array.isArray(body.offers) ? body.offers : [];
+      for (const lineRaw of offers) {
+        const line = lineRaw && typeof lineRaw === 'object' ? lineRaw : null;
+        if (!line) continue;
+        const lineBtc = toIntOrNull((line as any).btc_sats);
+        const lineUsdt = String((line as any).usdt_amount || '').trim();
+        if (lineBtc === null || lineBtc < 1 || !/^[0-9]+$/.test(lineUsdt)) continue;
+        if (lineBtc !== rfqBtc || lineUsdt !== rfqUsdt) continue;
+
+        const lineMaxPlatform = Math.max(0, Math.min(500, toIntOrNull((line as any).max_platform_fee_bps) ?? 500));
+        const lineMaxTrade = Math.max(0, Math.min(1000, toIntOrNull((line as any).max_trade_fee_bps) ?? 1000));
+        const lineMaxTotal = Math.max(0, Math.min(1500, toIntOrNull((line as any).max_total_fee_bps) ?? 1500));
+        if (lineMaxPlatform > rfqMaxPlatform || lineMaxTrade > rfqMaxTrade || lineMaxTotal > rfqMaxTotal) continue;
+
+        const lineMinWin = Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull((line as any).min_sol_refund_window_sec) ?? 3600));
+        const lineMaxWin = Math.max(3600, Math.min(7 * 24 * 3600, toIntOrNull((line as any).max_sol_refund_window_sec) ?? 7 * 24 * 3600));
+        const overlapMin = Math.max(rfqMinWin, lineMinWin);
+        const overlapMax = Math.min(rfqMaxWin, lineMaxWin);
+        if (overlapMin > overlapMax) continue;
+
+        let solRefundWindowSec = 72 * 3600;
+        if (solRefundWindowSec < overlapMin) solRefundWindowSec = overlapMin;
+        if (solRefundWindowSec > overlapMax) solRefundWindowSec = overlapMax;
+
+        return { solRefundWindowSec };
+      }
+    }
+    return null;
+  }
+
+  async function acceptQuoteEnvelope(quoteEvt: any, opts: { origin: 'auto' | 'manual' }) {
+    const channel = String((quoteEvt as any)?.channel || '').trim();
+    const msg = quoteEvt?.message;
+    if (!channel || !msg || typeof msg !== 'object') throw new Error('quote event missing channel/message');
+    if (opts.origin === 'manual' && toolRequiresApproval('intercomswap_quote_accept') && !autoApprove) {
+      const ok = window.confirm(`Accept quote now?\n\nchannel: ${channel}`);
+      if (!ok) return null;
+    }
+    const out = await runToolFinal(
+      'intercomswap_quote_accept',
+      { channel, quote_envelope: msg, ln_liquidity_mode: lnLiquidityMode },
+      { auto_approve: true }
+    );
+    const cj = out?.content_json;
+    if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'error') {
+      throw new Error(String((cj as any).error || 'quote_accept failed'));
+    }
+    return cj && typeof cj === 'object' ? cj : null;
+  }
+
   const sellUsdtFeedItems = useMemo(() => {
     const out: any[] = [];
     out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'RFQ Inbox', count: rfqEvents.length, open: sellUsdtInboxOpen, onToggle: () => setSellUsdtInboxOpen((v) => !v) });
@@ -1215,12 +1621,16 @@ function App() {
     if (sellBtcInboxOpen) {
       for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
     }
+    out.push({ _t: 'header', id: 'h:inboxquotes', title: 'Quote Inbox', count: quoteEvents.length, open: sellBtcQuotesOpen, onToggle: () => setSellBtcQuotesOpen((v) => !v) });
+    if (sellBtcQuotesOpen) {
+      for (const e of quoteEvents) out.push({ _t: 'quote', id: `q:${e.db_id || e.seq || e.ts}`, evt: e });
+    }
     out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length, open: sellBtcMyOpen, onToggle: () => setSellBtcMyOpen((v) => !v) });
     if (sellBtcMyOpen) {
       for (const e of myRfqPosts) out.push({ _t: 'rfq', id: `my:${e.rfq_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
     }
     return out;
-  }, [offerEvents, myRfqPosts, sellBtcInboxOpen, sellBtcMyOpen]);
+  }, [offerEvents, quoteEvents, myRfqPosts, sellBtcInboxOpen, sellBtcQuotesOpen, sellBtcMyOpen]);
 
   function oldestDbId(list: any[]) {
     let min = Number.POSITIVE_INFINITY;
@@ -2477,6 +2887,7 @@ function App() {
 
       const rows: Array<{
         id: string;
+        chan_id: string;
         peer: string;
         state: string;
         active: boolean;
@@ -2504,6 +2915,7 @@ function App() {
           const cap = parseSats((ch as any)?.capacity) ?? local + remote;
           rows.push({
             id: String((ch as any)?.channel_point || (ch as any)?.chan_id || '').trim(),
+            chan_id: String((ch as any)?.chan_id || '').trim(),
             peer: String((ch as any)?.remote_pubkey || '').trim().toLowerCase(),
             state: (ch as any)?.active ? 'active' : 'inactive',
             active: Boolean((ch as any)?.active),
@@ -2530,6 +2942,7 @@ function App() {
           const idFromFunding = fundingTxid && fundingOutnum !== null ? `${fundingTxid}:${fundingOutnum}` : '';
           rows.push({
             id: String((ch as any)?.channel_id || (ch as any)?.short_channel_id || idFromFunding || (ch as any)?.peer_id || '').trim(),
+            chan_id: '',
             peer: String((ch as any)?.peer_id || '').trim().toLowerCase(),
             state,
             active,
@@ -3538,6 +3951,19 @@ function App() {
   const lnChannelCount = Number(preflight?.ln_summary?.channels || 0);
   const lnActiveChannelCount = Number(preflight?.ln_summary?.channels_active || 0);
   const lnChannelRows = Array.isArray(preflight?.ln_summary?.channel_rows) ? preflight.ln_summary.channel_rows : [];
+  const lnNumericChanIdOptions = useMemo(() => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const ch of lnChannelRows) {
+      const v = String((ch as any)?.chan_id || '').trim();
+      if (!/^[0-9]+$/.test(v)) continue;
+      if (seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+    }
+    out.sort((a, b) => (a.length !== b.length ? a.length - b.length : a.localeCompare(b)));
+    return out;
+  }, [lnChannelRows]);
   const lnVisibleChannelRows = useMemo(() => {
     if (lnShowInactiveChannels) return lnChannelRows;
     return lnChannelRows.filter((ch: any) => Boolean(ch?.active));
@@ -4462,7 +4888,7 @@ function App() {
               <VirtualList
                 items={sellUsdtFeedItems}
                 itemKey={(it) => String(it.id || Math.random())}
-                estimatePx={92}
+                estimatePx={58}
                 render={(it) =>
                   it._t === 'header' ? (
                     <div className="feedhdr feedhdr-toggle" onClick={it.onToggle}>
@@ -4911,7 +5337,7 @@ function App() {
               <VirtualList
                 items={sellBtcFeedItems}
                 itemKey={(it) => String(it.id || Math.random())}
-                estimatePx={92}
+                estimatePx={58}
                 render={(it) =>
                   it._t === 'header' ? (
                     <div className="feedhdr feedhdr-toggle" onClick={it.onToggle}>
@@ -4927,6 +5353,25 @@ function App() {
 	                      onSelect={() => setSelected({ type: it.badge ? 'offer_posted' : 'offer', evt: it.evt })}
 	                      onRespond={() => adoptOfferIntoRfqDraft(it.evt)}
 	                    />
+                    ) : it._t === 'quote' ? (
+                      <QuoteRow
+                        evt={it.evt}
+                        oracle={oracle}
+                        onSelect={() => setSelected({ type: 'quote', evt: it.evt })}
+                        onAccept={() => {
+                          void (async () => {
+                            try {
+                              const sig = String((it.evt as any)?.message?.sig || '').trim().toLowerCase();
+                              if (sig) autoAcceptedQuoteSigRef.current.add(sig);
+                              const out = await acceptQuoteEnvelope(it.evt, { origin: 'manual' });
+                              const quoteId = String((out as any)?.quote_id || '').trim();
+                              pushToast('success', `Quote accepted${quoteId ? ` (${quoteId.slice(0, 12)}…)` : ''}`);
+                            } catch (e: any) {
+                              pushToast('error', e?.message || String(e));
+                            }
+                          })();
+                        }}
+                      />
 	                  ) : (
 	                    <RfqRow
 	                      evt={it.evt}
@@ -5651,6 +6096,111 @@ function App() {
                     }}
                   >
                     Send BTC
+                  </button>
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Increase Inbound (Self-Pay)</span>
+                </div>
+                <div className="muted small">
+                  Creates an invoice on this node and pays it from this same node to shift liquidity inbound (best-effort).
+                  {' '}
+                  LND supports explicit self-payment; route outcome still depends on available channels.
+                </div>
+                <div className="gridform" style={{ marginTop: 8 }}>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">amount</span>
+                    </div>
+                    <BtcSatsField
+                      name="ln_rebalance_amount"
+                      sats={lnRebalanceAmountSats}
+                      onSats={(n) => setLnRebalanceAmountSats(Number(n || 0))}
+                    />
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">max routing fee</span>
+                      <span className="muted small">sat</span>
+                    </div>
+                    <input
+                      className="input mono"
+                      type="number"
+                      min={0}
+                      max={10000000}
+                      value={String(lnRebalanceFeeLimitSat)}
+                      onChange={(e) => {
+                        const n = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(n)) setLnRebalanceFeeLimitSat(Math.max(0, Math.min(10_000_000, Math.trunc(n))));
+                      }}
+                    />
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">outgoing chan id (optional)</span>
+                    </div>
+                    <input
+                      className="input mono"
+                      value={lnRebalanceOutgoingChanId}
+                      onChange={(e) => setLnRebalanceOutgoingChanId(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder={lnImpl === 'lnd' ? 'numeric chan_id' : 'LND only'}
+                    />
+                    {lnNumericChanIdOptions.length > 0 ? (
+                      <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                        {lnNumericChanIdOptions.slice(0, 8).map((id) => (
+                          <button key={id} className="btn small" onClick={() => setLnRebalanceOutgoingChanId(id)}>
+                            use {id}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="muted small" style={{ marginTop: 6 }}>
+                      Leave empty to let Lightning choose a route/channel automatically.
+                    </div>
+                  </div>
+                </div>
+                <div className="row" style={{ marginTop: 8 }}>
+                  <button
+                    className="btn primary"
+                    disabled={
+                      runBusy ||
+                      lnChannelCount < 1 ||
+                      !Number.isInteger(lnRebalanceAmountSats) ||
+                      Number(lnRebalanceAmountSats) <= 0
+                    }
+                    onClick={async () => {
+                      const amount_sats = Number(lnRebalanceAmountSats || 0);
+                      const fee_limit_sat = Number(lnRebalanceFeeLimitSat || 0);
+                      const outgoing_chan_id = String(lnRebalanceOutgoingChanId || '').trim();
+                      if (toolRequiresApproval('intercomswap_ln_rebalance_selfpay') && !autoApprove) {
+                        const ok = window.confirm(
+                          `Run self-pay rebalance now?\n\namount_sats: ${amount_sats}\nfee_limit_sat: ${fee_limit_sat}${
+                            outgoing_chan_id ? `\noutgoing_chan_id: ${outgoing_chan_id}` : ''
+                          }`
+                        );
+                        if (!ok) return;
+                      }
+                      try {
+                        const out = await runDirectToolOnce(
+                          'intercomswap_ln_rebalance_selfpay',
+                          {
+                            amount_sats,
+                            fee_limit_sat: fee_limit_sat >= 0 ? fee_limit_sat : undefined,
+                            outgoing_chan_id: outgoing_chan_id || undefined,
+                          },
+                          { auto_approve: true }
+                        );
+                        const hash = String((out as any)?.payment_hash_hex || '').trim();
+                        pushToast('success', `Self-pay rebalance sent${hash ? ` (${hash.slice(0, 12)}…)` : ''}`, { ttlMs: 8_000 });
+                        void refreshPreflight();
+                      } catch (e: any) {
+                        pushToast('error', e?.message || String(e));
+                      }
+                    }}
+                  >
+                    Rebalance Inbound
                   </button>
                 </div>
               </div>
@@ -6416,6 +6966,54 @@ function App() {
 	                  />
 	                  show dismissed/done invites
 	                </label>
+	              </div>
+	            </div>
+	            <div className="field">
+	              <div className="field-hd">
+	                <span className="mono">Swap Automation</span>
+	              </div>
+	              <div className="row">
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
+	                    checked={autoQuoteFromOffers}
+	                    onChange={(e) => setAutoQuoteFromOffers(Boolean(e.target.checked))}
+	                  />
+	                  auto-quote matching RFQs from my offers
+	                </label>
+	              </div>
+	              <div className="row">
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
+	                    checked={autoAcceptQuotes}
+	                    onChange={(e) => setAutoAcceptQuotes(Boolean(e.target.checked))}
+	                  />
+	                  auto-accept quotes for my RFQs
+	                </label>
+	              </div>
+	              <div className="row">
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
+	                    checked={autoInviteFromAccepts}
+	                    onChange={(e) => setAutoInviteFromAccepts(Boolean(e.target.checked))}
+	                  />
+	                  auto-send swap invites after quote_accept
+	                </label>
+	              </div>
+	              <div className="row">
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
+	                    checked={autoJoinSwapInvites}
+	                    onChange={(e) => setAutoJoinSwapInvites(Boolean(e.target.checked))}
+	                  />
+	                  auto-join actionable swap invites
+	                </label>
+	              </div>
+	              <div className="muted small">
+	                Default flow is automatic. You can still accept quotes manually from Sell BTC ▸ Quote Inbox.
 	              </div>
 	            </div>
 	            <div className="field">
@@ -7773,6 +8371,80 @@ function EventRow({
       </div>
       <div className="rowitem-bot">
         <span className="muted small">{previewMessage(evt?.message)}</span>
+      </div>
+    </div>
+  );
+}
+
+function QuoteRow({
+  evt,
+  oracle,
+  onSelect,
+  onAccept,
+}: {
+  evt: any;
+  oracle?: OracleSummary;
+  onSelect: () => void;
+  onAccept: () => void;
+}) {
+  const body = evt?.message?.body;
+  const postedIso = typeof evt?.ts === 'number' ? msToUtcIso(evt.ts) : '';
+  const tradeId = String(evt?.trade_id || evt?.message?.trade_id || '').trim();
+  const rfqId = String(body?.rfq_id || '').trim();
+  const btcSats = typeof body?.btc_sats === 'number' ? body.btc_sats : null;
+  const usdtAtomic = typeof body?.usdt_amount === 'string' ? body.usdt_amount : '';
+  const platformFee = body?.platform_fee_bps;
+  const tradeFee = body?.trade_fee_bps;
+  const totalFee = typeof platformFee === 'number' && typeof tradeFee === 'number' ? platformFee + tradeFee : null;
+  const solWindow = body?.sol_refund_window_sec;
+  const validUntil = body?.valid_until_unix;
+  const validUntilIso = typeof validUntil === 'number' ? unixSecToUtcIso(validUntil) : '';
+  const oracleBtcUsd = oracle && typeof oracle.btc_usd === 'number' ? oracle.btc_usd : null;
+  const oracleUsdtUsd = oracle && typeof oracle.usdt_usd === 'number' ? oracle.usdt_usd : null;
+  const btcUsd = btcSats !== null && oracleBtcUsd ? (btcSats / 1e8) * oracleBtcUsd : null;
+  const usdtNum = usdtAtomic ? atomicToNumber(usdtAtomic, 6) : null;
+  const usdtUsd = usdtNum !== null && oracleUsdtUsd ? usdtNum * oracleUsdtUsd : null;
+  return (
+    <div className="rowitem" role="button" onClick={onSelect}>
+      <div className="rowitem-top">
+        {postedIso ? <span className="mono dim">{postedIso}</span> : null}
+        <span className="mono chip">{evt.channel}</span>
+        {tradeId ? <span className="mono dim">{tradeId}</span> : null}
+      </div>
+      <div className="rowitem-mid">
+        <span className="mono">quote for your RFQ</span>
+        {rfqId ? <span className="mono dim">rfq_id: {rfqId}</span> : null}
+        <span className="mono">
+          BTC: {btcSats !== null ? `${satsToBtcDisplay(btcSats)} BTC (${btcSats} sats)` : '?'}
+          {btcUsd !== null ? ` ≈ ${fmtUsd(btcUsd)}` : ''}
+        </span>
+        <span className="mono">
+          USDT: {usdtAtomic ? `${atomicToDecimal(usdtAtomic, 6)} (${usdtAtomic})` : '?'}
+          {usdtUsd !== null ? ` ≈ ${fmtUsd(usdtUsd)}` : ''}
+        </span>
+        <span className="mono">
+          fees:{' '}
+          {typeof platformFee === 'number' ? `${platformFee} bps (${bpsToPctDisplay(platformFee)}%)` : '?'} platform,{' '}
+          {typeof tradeFee === 'number' ? `${tradeFee} bps (${bpsToPctDisplay(tradeFee)}%)` : '?'} trade,{' '}
+          {typeof totalFee === 'number' ? `${totalFee} bps (${bpsToPctDisplay(totalFee)}%)` : '?'} total
+        </span>
+        <span className="mono">
+          sol window: {typeof solWindow === 'number' ? `${secToHuman(solWindow)} (${solWindow}s)` : '?'}
+        </span>
+        <span className="mono">
+          expires: {validUntilIso || '?'}{typeof validUntil === 'number' ? ` (${validUntil})` : ''}
+        </span>
+      </div>
+      <div className="rowitem-bot">
+        <button
+          className="btn small primary"
+          onClick={(e) => {
+            e.stopPropagation();
+            onAccept();
+          }}
+        >
+          Accept
+        </button>
       </div>
     </div>
   );

@@ -895,6 +895,34 @@ export const INTERCOMSWAP_TOOLS = [
     },
     required: ['bolt11'],
   }),
+  tool(
+    'intercomswap_ln_rebalance_selfpay',
+    'Best-effort inbound rebalance: create an invoice on this node and pay it from this same node. Works best with LND using allow_self_payment; routing outcome depends on available channels/routes.',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        amount_sats: { type: 'integer', minimum: 1, maximum: 21_000_000 * 100_000_000, description: 'Amount to loop through Lightning (sats).' },
+        fee_limit_sat: { type: 'integer', minimum: 0, maximum: 10_000_000, description: 'Optional max routing fee for the self-payment.' },
+        outgoing_chan_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 32,
+          pattern: '^[0-9]+$',
+          description: 'Optional LND-only outgoing chan_id pin (numeric).',
+        },
+        last_hop_pubkey: {
+          type: 'string',
+          minLength: 66,
+          maxLength: 66,
+          pattern: '^[0-9a-fA-F]{66}$',
+          description: 'Optional LND-only last hop pubkey (hex33).',
+        },
+        expiry_sec: { type: 'integer', minimum: 60, maximum: 60 * 60 * 24 * 7, description: 'Optional invoice expiry.' },
+      },
+      required: ['amount_sats'],
+    }
+  ),
   tool('intercomswap_ln_pay_status', 'Query payment status by payment_hash.', {
     type: 'object',
     additionalProperties: false,
