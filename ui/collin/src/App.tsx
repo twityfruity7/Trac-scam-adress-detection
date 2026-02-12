@@ -1350,11 +1350,60 @@ function App() {
     return Boolean(tradeId && terminalTradeIdsSet.has(tradeId));
   };
 
+  const isTerminalTradeState = (stateRaw: any): boolean => {
+    const state = String(stateRaw || '').trim().toLowerCase();
+    return (
+      state === 'claimed' ||
+      state === 'refunded' ||
+      state === 'canceled' ||
+      state === 'cancelled' ||
+      state === 'failed' ||
+      state === 'expired'
+    );
+  };
+
+  const tradeUpdatedAtMs = (trade: any): number => {
+    const raw = trade?.updated_at;
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+    if (typeof raw === 'string' && /^[0-9]+$/.test(raw.trim())) {
+      const n = Number.parseInt(raw.trim(), 10);
+      if (Number.isFinite(n)) return n;
+    }
+    return 0;
+  };
+
   useEffect(() => {
     if (terminalTradeIdsSet.size < 1) return;
     setOpenRefunds((prev) => prev.filter((t) => !terminalTradeIdsSet.has(String(t?.trade_id || '').trim())));
     setOpenClaims((prev) => prev.filter((t) => !terminalTradeIdsSet.has(String(t?.trade_id || '').trim())));
   }, [terminalTradeIdsSet]);
+
+  // Keep selected trade view in sync when receipt rows are refreshed with newer state.
+  useEffect(() => {
+    if (selected?.type !== 'trade') return;
+    const tradeId = String(selected?.trade?.trade_id || '').trim();
+    if (!tradeId) return;
+    let freshest: any = null;
+    for (const t of trades) {
+      if (String(t?.trade_id || '').trim() !== tradeId) continue;
+      if (!freshest || tradeUpdatedAtMs(t) >= tradeUpdatedAtMs(freshest)) freshest = t;
+    }
+    for (const t of openRefunds) {
+      if (String(t?.trade_id || '').trim() !== tradeId) continue;
+      if (!freshest || tradeUpdatedAtMs(t) >= tradeUpdatedAtMs(freshest)) freshest = t;
+    }
+    for (const t of openClaims) {
+      if (String(t?.trade_id || '').trim() !== tradeId) continue;
+      if (!freshest || tradeUpdatedAtMs(t) >= tradeUpdatedAtMs(freshest)) freshest = t;
+    }
+    if (!freshest) return;
+    const current = selected?.trade;
+    const changed =
+      tradeUpdatedAtMs(freshest) !== tradeUpdatedAtMs(current) ||
+      String(freshest?.state || '') !== String(current?.state || '') ||
+      String(freshest?.last_error || '') !== String(current?.last_error || '');
+    if (changed) setSelected({ type: 'trade', trade: freshest });
+  }, [selected, trades, openRefunds, openClaims]);
 
   const rendezvousChannels = useMemo(
     () => normalizeChannels(scChannels.split(',').map((s) => s.trim()).filter(Boolean), { max: 50, dropSwapTradeChannels: true }),
@@ -3775,16 +3824,27 @@ function App() {
       const page = await runDirectToolOnce('intercomswap_receipts_list', { ...receiptsDbArg, limit: tradesLimit, offset }, { auto_approve: false });
       const arr = Array.isArray(page) ? page : [];
       setTrades((prev) => {
-        const next = reset ? [] : prev;
-        const seen = new Set(next.map((t) => String(t?.trade_id || '')).filter(Boolean));
-        const toAdd = arr.filter((t) => {
+        const base = reset ? [] : prev;
+        const byId = new Map<string, any>();
+        const upsert = (t: any) => {
           const id = String(t?.trade_id || '').trim();
-          if (!id) return false;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
-        const out = next.concat(toAdd);
+          if (!id) return;
+          const existing = byId.get(id);
+          if (!existing) {
+            byId.set(id, t);
+            return;
+          }
+          const nextTs = tradeUpdatedAtMs(t);
+          const existingTs = tradeUpdatedAtMs(existing);
+          const nextTerminal = isTerminalTradeState(t?.state);
+          const existingTerminal = isTerminalTradeState(existing?.state);
+          if (nextTs > existingTs || (nextTs === existingTs && nextTerminal && !existingTerminal)) {
+            byId.set(id, t);
+          }
+        };
+        for (const t of base) upsert(t);
+        for (const t of arr) upsert(t);
+        const out = Array.from(byId.values()).sort((a, b) => tradeUpdatedAtMs(b) - tradeUpdatedAtMs(a));
         return out.length <= 2000 ? out : out.slice(0, 2000);
       });
       setTradesOffset(offset + arr.length);
@@ -3809,21 +3869,28 @@ function App() {
       );
       const arr = Array.isArray(page) ? page : [];
       setOpenRefunds((prev) => {
-        const next = (reset ? [] : prev).filter((t) => {
+        const base = (reset ? [] : prev).filter((t) => {
           const id = String(t?.trade_id || '').trim();
           if (!id) return false;
           return !terminalTradeIdsSet.has(id);
         });
-        const seen = new Set(next.map((t) => String(t?.trade_id || '')).filter(Boolean));
-        const toAdd = arr.filter((t) => {
+        const byId = new Map<string, any>();
+        const upsert = (t: any) => {
           const id = String(t?.trade_id || '').trim();
-          if (!id) return false;
-          if (terminalTradeIdsSet.has(id)) return false;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
-        const out = next.concat(toAdd);
+          if (!id) return;
+          if (terminalTradeIdsSet.has(id)) return;
+          const existing = byId.get(id);
+          if (!existing) {
+            byId.set(id, t);
+            return;
+          }
+          const nextTs = tradeUpdatedAtMs(t);
+          const existingTs = tradeUpdatedAtMs(existing);
+          if (nextTs >= existingTs) byId.set(id, t);
+        };
+        for (const t of base) upsert(t);
+        for (const t of arr) upsert(t);
+        const out = Array.from(byId.values()).sort((a, b) => tradeUpdatedAtMs(b) - tradeUpdatedAtMs(a));
         return out.length <= 2000 ? out : out.slice(0, 2000);
       });
       setOpenRefundsOffset(offset + arr.length);
@@ -3851,21 +3918,28 @@ function App() {
       );
       const arr = Array.isArray(page) ? page : [];
       setOpenClaims((prev) => {
-        const next = (reset ? [] : prev).filter((t) => {
+        const base = (reset ? [] : prev).filter((t) => {
           const id = String(t?.trade_id || '').trim();
           if (!id) return false;
           return !terminalTradeIdsSet.has(id);
         });
-        const seen = new Set(next.map((t) => String(t?.trade_id || '')).filter(Boolean));
-        const toAdd = arr.filter((t) => {
+        const byId = new Map<string, any>();
+        const upsert = (t: any) => {
           const id = String(t?.trade_id || '').trim();
-          if (!id) return false;
-          if (terminalTradeIdsSet.has(id)) return false;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
-        const out = next.concat(toAdd);
+          if (!id) return;
+          if (terminalTradeIdsSet.has(id)) return;
+          const existing = byId.get(id);
+          if (!existing) {
+            byId.set(id, t);
+            return;
+          }
+          const nextTs = tradeUpdatedAtMs(t);
+          const existingTs = tradeUpdatedAtMs(existing);
+          if (nextTs >= existingTs) byId.set(id, t);
+        };
+        for (const t of base) upsert(t);
+        for (const t of arr) upsert(t);
+        const out = Array.from(byId.values()).sort((a, b) => tradeUpdatedAtMs(b) - tradeUpdatedAtMs(a));
         return out.length <= 2000 ? out : out.slice(0, 2000);
       });
       setOpenClaimsOffset(offset + arr.length);
@@ -4505,6 +4579,23 @@ function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
+
+  // Keep receipt-based tabs fresh so terminal state transitions are reflected without manual refresh.
+  useEffect(() => {
+    if (!health?.ok) return;
+    if (activeTab !== 'trade_actions' && activeTab !== 'refunds') return;
+    const run = () => {
+      if (activeTab === 'trade_actions') void loadTradesPage({ reset: true });
+      if (activeTab === 'refunds') {
+        void loadOpenRefundsPage({ reset: true });
+        void loadOpenClaimsPage({ reset: true });
+      }
+    };
+    run();
+    const t = setInterval(run, 15_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, health?.ok, selectedReceiptsSource?.key]);
 
   // When switching receipts DB sources, reset pagination so operators don't mix multiple stores.
   useEffect(() => {
