@@ -1678,7 +1678,7 @@ function App() {
         out.push({ _t: 'rfq', id: feedEventId('inrfq:', e, i), evt: e });
       }
     }
-    out.push({ _t: 'header', id: 'h:myoffers', title: 'My USDT Sales', count: myOfferPosts.length, open: sellUsdtMyOpen, onToggle: () => toggleSellUsdtSection('mine') });
+    out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length, open: sellUsdtMyOpen, onToggle: () => toggleSellUsdtSection('mine') });
     if (sellUsdtMyOpen) {
       for (let i = 0; i < myOfferPosts.length; i += 1) {
         const e = myOfferPosts[i];
@@ -1704,7 +1704,7 @@ function App() {
         out.push({ _t: 'quote', id: feedEventId('inq:', e, i), evt: e });
       }
     }
-    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My BTC Sales', count: myRfqPosts.length, open: sellBtcMyOpen, onToggle: () => toggleSellBtcSection('mine') });
+    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My Offers', count: myRfqPosts.length, open: sellBtcMyOpen, onToggle: () => toggleSellBtcSection('mine') });
     if (sellBtcMyOpen) {
       for (let i = 0; i < myRfqPosts.length; i += 1) {
         const e = myRfqPosts[i];
@@ -2755,6 +2755,22 @@ function App() {
     }
   }
 
+  function rotateRfqDraftTradeIds() {
+    setRfqLines((prev) => {
+      const now = Date.now();
+      return prev.map((l, i) => ({
+        ...l,
+        id: `rfq-${now}-${i}`,
+        trade_id: `rfq-${now}-${i}-${Math.random().toString(16).slice(2, 10)}`,
+      }));
+    });
+  }
+
+  function isSoftAutopostStopReason(reason: string) {
+    const r = String(reason || '').trim().toLowerCase();
+    return r === 'filled' || r === 'expired';
+  }
+
   async function postOffer() {
     if (offerBusy) return;
     if (!stackGate.ok) return void stackBlockedToast('Post offer');
@@ -2883,7 +2899,12 @@ function App() {
         const cj = out?.content_json;
         if (cj && typeof cj === 'object' && cj.type === 'error') throw new Error(String(cj.error || 'autopost_start failed'));
         if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'autopost_stopped') {
-          pushToast('error', `Offer bot not started (${botName}): ${String((cj as any).reason || 'stopped')}`);
+          const reason = String((cj as any).reason || 'stopped');
+          if (isSoftAutopostStopReason(reason)) {
+            pushToast('info', `Offer bot ended immediately (${botName}): ${reason}`);
+          } else {
+            pushToast('error', `Offer bot not started (${botName}): ${reason}`);
+          }
         } else {
           pushToast('success', `Offer bot started (${botName})`);
         }
@@ -3000,18 +3021,13 @@ function App() {
           'success',
           `RFQ${okCount === 1 ? '' : 's'} posted: ${okCount}${firstId ? ` (first ${firstId.slice(0, 12)}…)` : ''}`
         );
-        // Prepare a fresh batch (new trade_ids) for the next manual post, while keeping amounts.
-        setRfqLines((prev) =>
-          prev.map((l, i) => ({
-            ...l,
-            id: `rfq-${Date.now()}-${i}`,
-            trade_id: `rfq-${Date.now()}-${i}-${Math.random().toString(16).slice(2, 10)}`,
-          }))
-        );
+        // Always rotate trade ids so the next post is a brand new RFQ set.
+        rotateRfqDraftTradeIds();
       } else {
         const nowSec = Math.floor(Date.now() / 1000);
         const ttlSec = Math.max(10, Math.min(7 * 24 * 3600, Math.trunc(rfqValidUntilUnix - nowSec)));
         let okCount = 0;
+        let softStopCount = 0;
         for (let i = 0; i < lines.length; i += 1) {
           const l = lines[i];
           const trade_id = String(l.trade_id).trim();
@@ -3046,11 +3062,23 @@ function App() {
           const cj = out?.content_json;
           if (cj && typeof cj === 'object' && cj.type === 'error') throw new Error(String(cj.error || 'autopost_start failed'));
           if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'autopost_stopped') {
-            throw new Error(`RFQ bot not started (${botName}): ${String((cj as any).reason || 'stopped')}`);
+            const reason = String((cj as any).reason || 'stopped');
+            if (isSoftAutopostStopReason(reason)) {
+              softStopCount += 1;
+              continue;
+            }
+            throw new Error(`RFQ bot not started (${botName}): ${reason}`);
           }
           okCount += 1;
         }
-        pushToast('success', `RFQ bot${okCount === 1 ? '' : 's'} started: ${okCount}`);
+        if (okCount > 0) pushToast('success', `RFQ bot${okCount === 1 ? '' : 's'} started: ${okCount}`);
+        if (softStopCount > 0) {
+          pushToast('info', `RFQ bot skipped ${softStopCount} line${softStopCount === 1 ? '' : 's'} (already filled/expired).`);
+        }
+        if (okCount > 0 || softStopCount > 0) {
+          // Rotate draft ids in bot mode too, so repeated starts do not reuse stale trade_ids.
+          rotateRfqDraftTradeIds();
+        }
         void refreshPreflight();
       }
     } catch (e: any) {
@@ -4710,7 +4738,7 @@ function App() {
 	            <NavButton
 	              active={activeTab === 'sell_usdt'}
 	              onClick={() => setActiveTab('sell_usdt')}
-	              label="Sell USDT"
+	              label="Buy BTC"
 	              badge={myOfferPosts.length}
 	            />
 	            <NavButton
@@ -4776,7 +4804,7 @@ function App() {
 		                </div>
 		              ) : (
 		                <div className="alert">
-		                  <span className="chip hi">READY</span> You can post Offers (Sell USDT) and RFQs (Sell BTC).
+		                  <span className="chip hi">READY</span> You can post Offers (Buy BTC) and RFQs (Sell BTC).
 		                </div>
 		              )}
 
@@ -5200,7 +5228,7 @@ function App() {
 
         {activeTab === 'sell_usdt' ? (
           <div className="grid2">
-            <Panel title="Sell USDT">
+            <Panel title="Buy BTC">
               {!stackGate.ok ? (
                 <div className="alert warn">
                   <b>Offer setup incomplete.</b> Complete these checklist items to enable posting:
@@ -9374,12 +9402,10 @@ function RfqRow({
         <span className="muted">win {typeof minWin === 'number' ? secToHuman(minWin) : '?'}–{typeof maxWin === 'number' ? secToHuman(maxWin) : '?'}</span>
         <span className="dim">{validUntilIso ? `exp ${validUntilIso}` : ''}</span>
       </div>
-      {showQuote ? (
+      {showQuote && !expired ? (
         <div className="rowitem-bot">
           <button
             className="btn small primary"
-            disabled={expired}
-            title={expired ? 'RFQ expired' : ''}
             onClick={(e) => {
               e.stopPropagation();
               onQuote();
@@ -9448,12 +9474,10 @@ function OfferRow({
         <span className="muted">win {typeof minWin === 'number' ? secToHuman(minWin) : '?'}–{typeof maxWin === 'number' ? secToHuman(maxWin) : '?'}</span>
         <span className="dim">{validUntilIso ? `exp ${validUntilIso}` : ''}</span>
       </div>
-      {showRespond ? (
+      {showRespond && !expired ? (
         <div className="rowitem-bot">
           <button
             className="btn small primary"
-            disabled={expired}
-            title={expired ? 'Offer expired' : ''}
             onClick={(e) => {
               e.stopPropagation();
               onRespond();
