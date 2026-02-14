@@ -1,5 +1,21 @@
+import { randomBytes } from 'node:crypto';
+
 function isObject(v) {
   return v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function sanitizeJobName(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  // Keep within tool schema: ^[A-Za-z0-9._-]+$ and length <= 64.
+  return s.replaceAll(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
+}
+
+function buildCollisionSafeName(baseName, { maxLen = 64 } = {}) {
+  const suffix = `${Date.now()}_${randomBytes(4).toString('hex')}`;
+  const base = sanitizeJobName(baseName) || 'job';
+  const maxBaseLen = Math.max(1, maxLen - suffix.length - 1);
+  return `${base.slice(0, maxBaseLen)}_${suffix}`;
 }
 
 function clampInt(n, { min, max }) {
@@ -69,9 +85,21 @@ export class AutopostManager {
   }
 
   async start({ name, tool, interval_sec, ttl_sec, valid_until_unix, args }) {
-    const n = String(name || '').trim();
+    let n = String(name || '').trim();
     if (!n) throw new Error('autopost_start: name is required');
-    if (this.jobs.has(n)) throw new Error(`autopost_start: name already exists (${n})`);
+    const requestedName = n;
+    // Allow posting the same terms multiple times ("chunking") even if the caller reuses a
+    // deterministic name. If the name is already taken, auto-suffix a unique token.
+    if (this.jobs.has(n)) {
+      for (let i = 0; i < 20; i += 1) {
+        const cand = buildCollisionSafeName(requestedName);
+        if (!this.jobs.has(cand)) {
+          n = cand;
+          break;
+        }
+      }
+      if (this.jobs.has(n)) throw new Error(`autopost_start: name already exists (${requestedName})`);
+    }
 
     const t = String(tool || '').trim();
     const allowed = new Set(['intercomswap_offer_post', 'intercomswap_rfq_post']);
@@ -252,7 +280,7 @@ export class AutopostManager {
 
     this.jobs.set(n, job);
 
-    return {
+    const out = {
       type: 'autopost_started',
       name: n,
       tool: t,
@@ -261,6 +289,8 @@ export class AutopostManager {
       valid_until_unix: job.validUntilUnix,
       first: first,
     };
+    if (requestedName !== n) out.requested_name = requestedName;
+    return out;
   }
 
   async stop({ name }) {

@@ -46,6 +46,15 @@ function parseFloatLike(value, fallback = null) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function parseBoolLike(value, fallback = null) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const s = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on'].includes(s)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(s)) return false;
+  return fallback;
+}
+
 function parseChannelList(value, fallback = []) {
   const src = Array.isArray(value) ? value : Array.isArray(fallback) ? fallback : [];
   const out = [];
@@ -114,6 +123,11 @@ export const DEFAULT_PROMPT_SETUP_PATH = 'onchain/prompt/setup.json';
   const llmRaw = isObject(raw.llm) ? raw.llm : {};
   const llmResponseFormat = isObject(llmRaw.response_format) ? llmRaw.response_format : null;
   const llmExtraBody = isObject(llmRaw.extra_body) ? llmRaw.extra_body : null;
+  const llmToolsCompactRaw = parseBoolLike(llmRaw.tools_compact, null);
+  const llmKeepToolDescriptionsRaw = parseBoolLike(llmRaw.tools_compact_keep_tool_descriptions, null);
+  const llmKeepSchemaDescriptionsRaw = parseBoolLike(llmRaw.tools_compact_keep_schema_descriptions, null);
+  const llmToolsSelectPassRaw = parseBoolLike(llmRaw.tools_select_pass, null);
+  const llmToolsSelectMaxToolsRaw = parseIntLike(llmRaw.tools_select_max_tools, null);
   const llm = {
     baseUrl: normalizeString(llmRaw.base_url),
     apiKey: normalizeApiKey(llmRaw.api_key),
@@ -128,6 +142,12 @@ export const DEFAULT_PROMPT_SETUP_PATH = 'onchain/prompt/setup.json';
     timeoutMs: parseIntLike(llmRaw.timeout_ms, 120_000) ?? 120_000,
     responseFormat: llmResponseFormat,
     extraBody: llmExtraBody,
+    toolsCompact: llmToolsCompactRaw === null ? true : Boolean(llmToolsCompactRaw),
+    toolsCompactKeepToolDescriptions: llmKeepToolDescriptionsRaw === null ? true : Boolean(llmKeepToolDescriptionsRaw),
+    toolsCompactKeepSchemaDescriptions: llmKeepSchemaDescriptionsRaw === null ? false : Boolean(llmKeepSchemaDescriptionsRaw),
+    toolsSelectPass: llmToolsSelectPassRaw === null ? false : Boolean(llmToolsSelectPassRaw),
+    toolsSelectMaxTools:
+      llmToolsSelectMaxToolsRaw === null ? 16 : Math.max(1, Math.min(64, Math.trunc(llmToolsSelectMaxToolsRaw))),
   };
   if (!llm.baseUrl) throw new Error(`Missing llm.base_url in ${resolved}`);
   if (!llm.model) throw new Error(`Missing llm.model in ${resolved}`);

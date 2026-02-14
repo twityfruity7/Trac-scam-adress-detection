@@ -62,6 +62,23 @@ function parseMaxTokensBudgetError(msg) {
   return Math.max(1, remaining - margin);
 }
 
+function sleepMs(ms) {
+  const n = Number(ms) || 0;
+  if (n <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, n));
+}
+
+function shouldBypassNgrokInterstitial(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (!host) return false;
+    return host.endsWith('.ngrok.dev') || host.endsWith('.ngrok-free.dev') || host.endsWith('.ngrok.io');
+  } catch (_e) {
+    return false;
+  }
+}
+
 export class OpenAICompatibleClient {
   constructor({
     baseUrl,
@@ -99,8 +116,10 @@ export class OpenAICompatibleClient {
     if (!Array.isArray(messages)) throw new Error('messages must be an array');
 
     let curMaxTokens = maxTokens;
-    let retries = 0;
-    const maxRetries = 1;
+    let budgetRetries = 0;
+    const maxBudgetRetries = 1;
+    let transientRetries = 0;
+    const maxTransientRetries = 2;
 
     while (true) {
       const body = {
@@ -139,8 +158,14 @@ export class OpenAICompatibleClient {
 
       const headers = {
         'Content-Type': 'application/json',
+        Accept: 'application/json',
         ...headersForUrl(url),
       };
+      if (shouldBypassNgrokInterstitial(url)) {
+        // ngrok's "browser warning" interstitial can show up as 200 text/html.
+        // This header opts out and keeps the API consistently JSON.
+        headers['ngrok-skip-browser-warning'] = 'true';
+      }
       if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
       const { signal: timeoutSignal, cleanup } = withTimeout(signal, this.timeoutMs);
@@ -165,14 +190,31 @@ export class OpenAICompatibleClient {
           // remaining budget (context_limit - input_tokens). Retry once with a clamped value.
           const clamp = parseMaxTokensBudgetError(msg);
           if (
-            retries < maxRetries &&
+            budgetRetries < maxBudgetRetries &&
             typeof clamp === 'number' &&
             clamp > 0 &&
             Number.isInteger(curMaxTokens) &&
             curMaxTokens > clamp
           ) {
-            retries += 1;
+            budgetRetries += 1;
             curMaxTokens = clamp;
+            continue;
+          }
+
+          // Transient engine/backplane errors (seen with some self-hosted engines/ngrok).
+          // Retry a couple times with a short backoff to reduce flakiness.
+          const isTransient =
+            res.status === 429 ||
+            res.status === 500 ||
+            res.status === 502 ||
+            res.status === 503 ||
+            res.status === 504 ||
+            /enginecore encountered an issue/i.test(msg) ||
+            /upstream connect error/i.test(msg) ||
+            /bad gateway/i.test(msg);
+          if (transientRetries < maxTransientRetries && isTransient) {
+            transientRetries += 1;
+            await sleepMs(250 * transientRetries);
             continue;
           }
 
@@ -185,8 +227,13 @@ export class OpenAICompatibleClient {
           const ct = res.headers?.get ? res.headers.get('content-type') : '';
           const snippet = (text || '').slice(0, 400);
           const isHtml = /text\/html/i.test(String(ct || '')) || /^<!doctype html/i.test(snippet) || /<html/i.test(snippet);
+          if (transientRetries < maxTransientRetries && isHtml) {
+            transientRetries += 1;
+            await sleepMs(250 * transientRetries);
+            continue;
+          }
           const hint = isHtml
-            ? 'LLM endpoint returned HTML (not JSON). This usually means the base_url is wrong, the endpoint is not OpenAI-compatible, or an ngrok interstitial is being served. Verify the server responds with JSON to POST /v1/chat/completions.'
+            ? `LLM endpoint returned HTML (not JSON). This usually means the base_url is wrong, the endpoint is not OpenAI-compatible, or an ngrok interstitial is being served. Verify the server responds with JSON to POST /v1/chat/completions. html_head=${JSON.stringify(snippet.slice(0, 200))}`
             : `invalid JSON response (status=${res.status}, content-type=${ct || 'unknown'}): ${snippet}`;
           const err = new Error(`LLM error: ${hint}`);
           err.status = res.status;

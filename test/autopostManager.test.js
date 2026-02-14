@@ -34,6 +34,48 @@ test('AutopostManager starts, runs immediately, repeats, and stops', async () =>
   assert.equal(calls, afterStop, 'no further calls after stop');
 });
 
+test('AutopostManager auto-renames on name collision (allows chunking)', async () => {
+  let calls = 0;
+  const mgr = new AutopostManager({
+    runTool: async ({ tool, args }) => {
+      calls += 1;
+      return { type: 'ok', tool, args };
+    },
+  });
+
+  const a = await mgr.start({
+    name: 'job-collide',
+    tool: 'intercomswap_rfq_post',
+    interval_sec: 60,
+    ttl_sec: 60,
+    args: { channel: 'c', trade_id: 'rfq-a', btc_sats: 1, usdt_amount: '1' },
+  });
+  assert.equal(a.type, 'autopost_started');
+
+  const b = await mgr.start({
+    name: 'job-collide',
+    tool: 'intercomswap_rfq_post',
+    interval_sec: 60,
+    ttl_sec: 60,
+    args: { channel: 'c', trade_id: 'rfq-b', btc_sats: 1, usdt_amount: '1' },
+  });
+  assert.equal(b.type, 'autopost_started');
+  assert.equal(b.requested_name, 'job-collide');
+  assert.notEqual(b.name, 'job-collide');
+  assert.notEqual(b.name, a.name);
+
+  // Each start runs once immediately.
+  assert.equal(calls, 2);
+
+  const st = mgr.status();
+  assert.equal(st.jobs.length, 2);
+  assert.ok(st.jobs.find((j) => j.name === a.name));
+  assert.ok(st.jobs.find((j) => j.name === b.name));
+
+  await mgr.stop({ name: a.name });
+  await mgr.stop({ name: b.name });
+});
+
 test('AutopostManager stops automatically on expiry and does not extend validity', async () => {
   let calls = 0;
   const seenValidUntil = new Set();

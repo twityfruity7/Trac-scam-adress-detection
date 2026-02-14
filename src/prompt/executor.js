@@ -1921,14 +1921,17 @@ export class ToolExecutor {
       return this._autopost.status({ name: name || '' });
     }
     if (toolName === 'intercomswap_autopost_start') {
-      assertAllowedKeys(args, toolName, ['name', 'tool', 'interval_sec', 'ttl_sec', 'valid_until_unix', 'args']);
+      // Apply prompt-mode repairs even when this tool is called directly (without /v1/run).
+      // Common issue: models use "arguments" instead of "args" for the nested sub-tool args.
+      const repairedArgs = repairToolArguments(toolName, args);
+      assertAllowedKeys(repairedArgs, toolName, ['name', 'tool', 'interval_sec', 'ttl_sec', 'valid_until_unix', 'args']);
       requireApproval(toolName, autoApprove);
-      const name = expectString(args, toolName, 'name', { min: 1, max: 64, pattern: /^[A-Za-z0-9._-]+$/ });
-      const tool = expectString(args, toolName, 'tool', { min: 1, max: 128 });
-      const intervalSec = expectInt(args, toolName, 'interval_sec', { min: 5, max: 24 * 3600 });
-      const ttlSec = expectInt(args, toolName, 'ttl_sec', { min: 10, max: 7 * 24 * 3600 });
-      const validUntil = expectOptionalInt(args, toolName, 'valid_until_unix', { min: 1 });
-      const subArgsRaw = args.args;
+      const name = expectString(repairedArgs, toolName, 'name', { min: 1, max: 64, pattern: /^[A-Za-z0-9._-]+$/ });
+      const tool = expectString(repairedArgs, toolName, 'tool', { min: 1, max: 128 });
+      const intervalSec = expectInt(repairedArgs, toolName, 'interval_sec', { min: 5, max: 24 * 3600 });
+      const ttlSec = expectInt(repairedArgs, toolName, 'ttl_sec', { min: 10, max: 7 * 24 * 3600 });
+      const validUntil = expectOptionalInt(repairedArgs, toolName, 'valid_until_unix', { min: 1 });
+      const subArgsRaw = repairedArgs.args;
       if (!isObject(subArgsRaw)) throw new Error(`${toolName}: args must be an object`);
       // Repair nested args for the scheduled sub-tool (common LLM mistake: flattening offer fields).
       const subArgs = repairToolArguments(tool, subArgsRaw);
@@ -3133,25 +3136,29 @@ export class ToolExecutor {
           if (!allowed.includes(k)) throw new Error(`${toolName}: offers[${i}].${k} unexpected`);
         }
 
-        const pair = expectString(offer, toolName, 'pair', { min: 1, max: 64 });
+        const pair = expectOptionalString(offer, toolName, 'pair', { min: 1, max: 64 }) ?? PAIR.BTC_LN__USDT_SOL;
         if (pair !== PAIR.BTC_LN__USDT_SOL) throw new Error(`${toolName}: offers[${i}].pair unsupported`);
-        const have = expectString(offer, toolName, 'have', { min: 1, max: 32 });
-        const want = expectString(offer, toolName, 'want', { min: 1, max: 32 });
+        const have = expectOptionalString(offer, toolName, 'have', { min: 1, max: 32 }) ?? ASSET.USDT_SOL;
+        const want = expectOptionalString(offer, toolName, 'want', { min: 1, max: 32 }) ?? ASSET.BTC_LN;
         if (have !== ASSET.USDT_SOL) throw new Error(`${toolName}: offers[${i}].have must be ${ASSET.USDT_SOL}`);
         if (want !== ASSET.BTC_LN) throw new Error(`${toolName}: offers[${i}].want must be ${ASSET.BTC_LN}`);
 
         const btcSats = expectInt(offer, toolName, 'btc_sats', { min: 1 });
         const usdtAmount = normalizeAtomicAmount(expectString(offer, toolName, 'usdt_amount', { max: 64 }), `offers[${i}].usdt_amount`);
 
-        const maxPlatformFeeBps = expectInt(offer, toolName, 'max_platform_fee_bps', { min: 0, max: 500 });
-        const maxTradeFeeBps = expectInt(offer, toolName, 'max_trade_fee_bps', { min: 0, max: 1000 });
-        const maxTotalFeeBps = expectInt(offer, toolName, 'max_total_fee_bps', { min: 0, max: 1500 });
+        const maxPlatformFeeBps = expectOptionalInt(offer, toolName, 'max_platform_fee_bps', { min: 0, max: 500 }) ?? FIXED_PLATFORM_FEE_BPS;
+        const maxTradeFeeBps = expectOptionalInt(offer, toolName, 'max_trade_fee_bps', { min: 0, max: 1000 }) ?? DEFAULT_TRADE_FEE_BPS;
+        const maxTotalFeeBps = expectOptionalInt(offer, toolName, 'max_total_fee_bps', { min: 0, max: 1500 }) ?? DEFAULT_TOTAL_FEE_BPS;
         if (maxPlatformFeeBps + maxTradeFeeBps > maxTotalFeeBps) {
           throw new Error(`${toolName}: offers[${i}] max_total_fee_bps must be >= platform+trade`);
         }
 
-        const minWin = expectInt(offer, toolName, 'min_sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC });
-        const maxWin = expectInt(offer, toolName, 'max_sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC });
+        const minWin =
+          expectOptionalInt(offer, toolName, 'min_sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC }) ??
+          SOL_REFUND_DEFAULT_SEC;
+        const maxWin =
+          expectOptionalInt(offer, toolName, 'max_sol_refund_window_sec', { min: SOL_REFUND_MIN_SEC, max: SOL_REFUND_MAX_SEC }) ??
+          SOL_REFUND_MAX_SEC;
         if (minWin > maxWin) throw new Error(`${toolName}: offers[${i}] min_sol_refund_window_sec must be <= max_sol_refund_window_sec`);
 
         maxOffers.push({

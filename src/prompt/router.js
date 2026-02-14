@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import { buildIntercomswapSystemPrompt } from './system.js';
 import { INTERCOMSWAP_TOOLS } from './tools.js';
+import { compactToolsForModel } from './toolsCompact.js';
 import { OpenAICompatibleClient } from './openaiClient.js';
 import { AuditLog } from './audit.js';
 import { SecretStore, isSecretHandle } from './secrets.js';
@@ -10,6 +11,98 @@ import { stableStringify } from '../util/stableStringify.js';
 
 function nowMs() {
   return Date.now();
+}
+
+function parseEveryIntervalSec(prompt) {
+  const p = String(prompt || '');
+  const m = p.match(
+    /\bevery\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\b/i
+  );
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return null;
+  const unit = String(m[2] || '').toLowerCase();
+  if (!unit) return n;
+  if (unit.startsWith('s')) return n;
+  if (unit.startsWith('m')) return n * 60;
+  if (unit.startsWith('h')) return n * 3600;
+  return null;
+}
+
+function parseSatsForUsdt(prompt) {
+  const p = String(prompt || '');
+  // Only handle narrow, explicit phrases. If this doesn't match, we fall back to the LLM.
+  // Examples:
+  // - "sell 1002 sats for 0.33 usdt"
+  // - "buy 1002 sats for 0.33 usdt"
+  const mSats = p.match(/\b(sell|buy)\s+(\d+)\s*(sat|sats)\b/i);
+  const mUsdt = p.match(/\bfor\s+([0-9]+(?:\.[0-9]+)?)\s*usdt\b/i);
+  if (!mSats || !mUsdt) return null;
+  const verb = String(mSats[1] || '').toLowerCase();
+  const sats = Number.parseInt(String(mSats[2] || ''), 10);
+  const usdt = String(mUsdt[1] || '').trim();
+  if (!Number.isFinite(sats) || !Number.isInteger(sats) || sats < 1) return null;
+  if (!usdt || !/^[0-9]+(?:\.[0-9]+)?$/.test(usdt)) return null;
+  return { verb, btc_sats: sats, usdt_amount: usdt };
+}
+
+function tryParseSimpleAutopostToolCall(prompt) {
+  const p = String(prompt || '').trim();
+  if (!p) return null;
+  // Avoid accidental side effects for question-like prompts.
+  if (/\?\s*$/.test(p)) return null;
+  if (!/\brepeat\b/i.test(p)) return null;
+
+  const intervalSec = parseEveryIntervalSec(p);
+  if (!intervalSec) return null;
+
+  const terms = parseSatsForUsdt(p);
+  if (!terms) return null;
+
+  const rand = randomBytes(4).toString('hex');
+  const nowMs = Date.now();
+  const ttlSec = 24 * 3600; // default 1 day if not explicitly specified
+  const channel = '0000intercomswapbtcusdt';
+
+  if (terms.verb === 'sell') {
+    // SELL sats/BTC for USDT => RFQ (BTC_LN->USDT_SOL)
+    return {
+      name: 'intercomswap_autopost_start',
+      arguments: {
+        name: `rfq_prompt_${rand}_${nowMs}`,
+        tool: 'intercomswap_rfq_post',
+        interval_sec: intervalSec,
+        ttl_sec: ttlSec,
+        args: {
+          channel,
+          trade_id: `rfq-${nowMs}-${rand}`,
+          btc_sats: terms.btc_sats,
+          usdt_amount: terms.usdt_amount,
+        },
+      },
+    };
+  }
+
+  if (terms.verb === 'buy') {
+    // BUY sats/BTC for USDT => Offer (have USDT, want BTC)
+    return {
+      name: 'intercomswap_autopost_start',
+      arguments: {
+        name: `offer_prompt_${rand}_${nowMs}`,
+        tool: 'intercomswap_offer_post',
+        interval_sec: intervalSec,
+        ttl_sec: ttlSec,
+        args: {
+          channels: [channel],
+          name: 'maker:prompt',
+          rfq_channels: [channel],
+          offers: [{ btc_sats: terms.btc_sats, usdt_amount: terms.usdt_amount }],
+        },
+      },
+    };
+  }
+
+  return null;
 }
 
 function safeJsonStringify(value) {
@@ -45,6 +138,11 @@ function safeJsonParse(text) {
   } catch (err) {
     return { ok: false, value: null, error: err?.message ?? String(err) };
   }
+}
+
+function isContextLimitError(err) {
+  const msg = String(err?.message || err || '');
+  return /maximum context length/i.test(msg) || /context length/i.test(msg) || /input tokens/i.test(msg);
 }
 
 function isValidStructuredFinal(value) {
@@ -343,6 +441,68 @@ export class PromptRouter {
     return { id, session: this._sessions.get(id) };
   }
 
+  async _selectToolNamesForPrompt(prompt, { allTools, maxTools = 16, signal = null } = {}) {
+    const p = String(prompt ?? '').trim();
+    if (!p) return null;
+    const list = Array.isArray(allTools) ? allTools : [];
+    if (list.length === 0) return null;
+
+    const maxLines = 500;
+    const lines = [];
+    for (const t of list) {
+      const name = t?.function?.name;
+      if (typeof name !== 'string' || !name.trim()) continue;
+      const desc = typeof t?.function?.description === 'string' ? t.function.description.trim() : '';
+      lines.push(`- ${name}${desc ? `: ${desc}` : ''}`);
+      if (lines.length >= maxLines) break;
+    }
+
+    const limit = Math.max(1, Math.min(64, Math.trunc(Number(maxTools) || 16)));
+    const sys =
+      'You are a tool selection router.\n' +
+      'Pick the smallest set of tool names needed to satisfy the user prompt.\n\n' +
+      'Output STRICT JSON only:\n' +
+      '{"tools":["tool_name_1","tool_name_2",...]}\n\n' +
+      `Rules:\n- Use ONLY tool names from the list.\n- Output at most ${limit} tools.\n- If no tools are needed, output {"tools":[]}.\n\n` +
+      `Available tools:\n${lines.join('\n')}`;
+
+    const extraBody = {};
+    if (this.llmConfig.extraBody && typeof this.llmConfig.extraBody === 'object') Object.assign(extraBody, this.llmConfig.extraBody);
+    if (this.llmConfig.responseFormat && typeof this.llmConfig.responseFormat === 'object') {
+      extraBody.response_format = this.llmConfig.responseFormat;
+    }
+
+    const out = await this.llmClient.chatCompletions({
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: p },
+      ],
+      tools: null,
+      toolChoice: 'none',
+      maxTokens: 256,
+      temperature: 0,
+      topP: 0.1,
+      extraBody: Object.keys(extraBody).length > 0 ? extraBody : null,
+      signal,
+    });
+
+    const parsed = safeJsonParse(out.content || '');
+    if (!parsed.ok || !isObject(parsed.value)) return null;
+    const tools = parsed.value.tools;
+    if (!Array.isArray(tools)) return null;
+    const names = [];
+    const seen = new Set();
+    for (const raw of tools) {
+      const n = typeof raw === 'string' ? raw.trim() : '';
+      if (!n) continue;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      names.push(n);
+      if (names.length >= limit) break;
+    }
+    return names;
+  }
+
   async run({
     prompt,
     sessionId = null,
@@ -363,11 +523,20 @@ export class PromptRouter {
       await emit({ type: 'run_start', session_id: id, started_at: nowMs(), auto_approve: autoApprove, dry_run: dryRun });
     }
 
-    const tools = INTERCOMSWAP_TOOLS;
-    const allowedToolNames = new Set(
-      tools
-        .map((t) => t?.function?.name)
-        .filter((n) => typeof n === 'string' && n.trim())
+    const toolsAll = INTERCOMSWAP_TOOLS;
+    const allowedToolNamesAll = new Set(
+      toolsAll.map((t) => t?.function?.name).filter((n) => typeof n === 'string' && n.trim())
+    );
+
+    const toolsCompactEnabled = this.llmConfig?.toolsCompact !== false; // default true
+    const toolsCompactOpts = {
+      keepToolDescriptions: this.llmConfig?.toolsCompactKeepToolDescriptions !== false, // default true
+      keepSchemaDescriptions: Boolean(this.llmConfig?.toolsCompactKeepSchemaDescriptions), // default false
+    };
+    const toolsForModelAll = toolsCompactEnabled ? compactToolsForModel(toolsAll, toolsCompactOpts) : toolsAll;
+    let toolsForModel = toolsForModelAll;
+    let allowedToolNames = new Set(
+      toolsForModel.map((t) => t?.function?.name).filter((n) => typeof n === 'string' && n.trim())
     );
     const toolFormat = this.llmConfig.toolFormat === 'functions' ? 'functions' : 'tools';
 
@@ -380,7 +549,7 @@ export class PromptRouter {
       const isTool = isObject(obj) && String(obj.type || '').trim() === 'tool';
       const name = isTool && typeof obj.name === 'string' ? obj.name.trim() : '';
       const args = isTool && isObject(obj.arguments) ? obj.arguments : null;
-      if (isTool && name && allowedToolNames.has(name) && args) {
+      if (isTool && name && allowedToolNamesAll.has(name) && args) {
         const repairedArgs = repairToolArguments(name, args);
         audit.write('direct_tool_prompt', { sessionId: id, name, arguments: args, autoApprove, dryRun });
         const toolStartedAt = nowMs();
@@ -414,7 +583,74 @@ export class PromptRouter {
       }
     }
 
+    // Narrow natural-language shortcut for common broadcast tasks:
+    // "sell/buy <n> sats for <x> usdt. repeat every <t>" => autopost RFQ/Offer.
+    // This avoids LLM misinterpretation and reduces reliance on flaky endpoints.
+    {
+      const nlTool = tryParseSimpleAutopostToolCall(p);
+      if (nlTool && typeof nlTool.name === 'string' && allowedToolNamesAll.has(nlTool.name) && isObject(nlTool.arguments)) {
+        const repairedArgs = repairToolArguments(nlTool.name, nlTool.arguments);
+        audit.write('nl_tool_prompt', { sessionId: id, prompt: p, name: nlTool.name, arguments: repairedArgs, autoApprove, dryRun });
+        const toolStartedAt = nowMs();
+        const toolResult = await this.toolExecutor.execute(nlTool.name, repairedArgs, { autoApprove, dryRun, secrets: session.secrets });
+        const toolResultForModel = sealToolResultForModel(toolResult, session.secrets);
+        const toolStep = {
+          type: 'tool',
+          name: nlTool.name,
+          arguments: repairedArgs,
+          started_at: toolStartedAt,
+          duration_ms: nowMs() - toolStartedAt,
+          result: toolResultForModel,
+        };
+        audit.write('tool_result', toolStep);
+        if (typeof emit === 'function') await emit(toolStep);
+        if (typeof emit === 'function') {
+          await emit({
+            type: 'final',
+            session_id: id,
+            content: safeJsonStringify(toolResultForModel),
+            content_json: toolResultForModel,
+            steps: 1,
+          });
+        }
+        return {
+          session_id: id,
+          content: safeJsonStringify(toolResultForModel),
+          content_json: toolResultForModel,
+          steps: [toolStep],
+        };
+      }
+    }
+
     session.messages.push({ role: 'user', content: p });
+
+    // Optional "tool selection" pre-pass:
+    // When enabled, we ask the LLM (without tool schemas) to pick which tool names are relevant,
+    // then run the main tool-calling pass with only that subset. This keeps prompting usable
+    // with 32k-context models and reduces output truncation.
+    if (this.llmConfig?.toolsSelectPass) {
+      try {
+        const selected = await this._selectToolNamesForPrompt(p, {
+          allTools: toolsAll,
+          maxTools: this.llmConfig?.toolsSelectMaxTools ?? 16,
+          signal,
+        });
+        if (Array.isArray(selected) && selected.length > 0) {
+          const keep = new Set(selected);
+          const filteredAll = toolsAll.filter((t) => keep.has(t?.function?.name));
+          const filteredModel = toolsCompactEnabled ? compactToolsForModel(filteredAll, toolsCompactOpts) : filteredAll;
+          if (filteredModel.length > 0) {
+            toolsForModel = filteredModel;
+            allowedToolNames = new Set(
+              toolsForModel.map((t) => t?.function?.name).filter((n) => typeof n === 'string' && n.trim())
+            );
+            audit.write('tools_selected', { selected, count: filteredModel.length });
+          }
+        }
+      } catch (e) {
+        audit.write('tools_selected_error', { error: e?.message || String(e) });
+      }
+    }
 
     const steps = [];
     const max = maxSteps ?? this.maxSteps;
@@ -422,6 +658,7 @@ export class PromptRouter {
     let lastToolSig = null;
     let repeatedToolStreak = 0;
     let lastExecutedTool = null; // { name, arguments, result }
+    let didToolsFallback = false;
 
     for (let i = 0; i < max; i += 1) {
       if (signal?.aborted) throw signal.reason || new Error('aborted');
@@ -435,19 +672,55 @@ export class PromptRouter {
         extraBody.response_format = this.llmConfig.responseFormat;
       }
 
-      const llmOut = await this.llmClient.chatCompletions({
-        messages: session.messages,
-        tools,
-        toolChoice: 'auto',
-        maxTokens: this.llmConfig.maxTokens,
-        temperature: this.llmConfig.temperature,
-        topP: this.llmConfig.topP,
-        topK: this.llmConfig.topK,
-        minP: this.llmConfig.minP,
-        repetitionPenalty: this.llmConfig.repetitionPenalty,
-        extraBody: Object.keys(extraBody).length > 0 ? extraBody : null,
-        signal,
-      });
+      let llmOut = null;
+      while (true) {
+        try {
+          llmOut = await this.llmClient.chatCompletions({
+            messages: session.messages,
+            tools: toolsForModel,
+            toolChoice: 'auto',
+            maxTokens: this.llmConfig.maxTokens,
+            temperature: this.llmConfig.temperature,
+            topP: this.llmConfig.topP,
+            topK: this.llmConfig.topK,
+            minP: this.llmConfig.minP,
+            repetitionPenalty: this.llmConfig.repetitionPenalty,
+            extraBody: Object.keys(extraBody).length > 0 ? extraBody : null,
+            signal,
+          });
+          break;
+        } catch (err) {
+          // Context-limit fallback: if the model rejects the request due to input tokens, retry once
+          // with a best-effort tool selection pass. This is off by default but always used here as
+          // a last resort, without requiring config changes.
+          if (!didToolsFallback && toolsForModel === toolsForModelAll && isContextLimitError(err)) {
+            didToolsFallback = true;
+            try {
+              const selected = await this._selectToolNamesForPrompt(p, {
+                allTools: toolsAll,
+                maxTools: this.llmConfig?.toolsSelectMaxTools ?? 16,
+                signal,
+              });
+              if (Array.isArray(selected) && selected.length > 0) {
+                const keep = new Set(selected);
+                const filteredAll = toolsAll.filter((t) => keep.has(t?.function?.name));
+                const filteredModel = toolsCompactEnabled ? compactToolsForModel(filteredAll, toolsCompactOpts) : filteredAll;
+                if (filteredModel.length > 0) {
+                  toolsForModel = filteredModel;
+                  allowedToolNames = new Set(
+                    toolsForModel.map((t) => t?.function?.name).filter((n) => typeof n === 'string' && n.trim())
+                  );
+                  audit.write('tools_selected_fallback', { selected, count: filteredModel.length });
+                  continue; // retry LLM call with smaller tool list
+                }
+              }
+            } catch (e) {
+              audit.write('tools_selected_fallback_error', { error: e?.message || String(e) });
+            }
+          }
+          throw err;
+        }
+      }
 
       // Some servers/models don't emit tool_calls reliably. If the assistant content contains a
       // structured tool call JSON object ({name,arguments}), treat it as a tool call.

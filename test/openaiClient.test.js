@@ -152,3 +152,26 @@ test('openai client: surfaces http errors', async (t) => {
   );
 });
 
+test('openai client: retries when endpoint returns HTML once (ngrok interstitial / proxy flake)', async (t) => {
+  let calls = 0;
+  const srv = await withServer(async (_req, res) => {
+    calls += 1;
+    if (calls === 1) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><html><body>ngrok warning</body></html>');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      })
+    );
+  });
+  t.after(async () => srv.close());
+
+  const client = new OpenAICompatibleClient({ baseUrl: srv.url, defaultModel: 'test-model', timeoutMs: 10_000 });
+  const out = await client.chatCompletions({ messages: [{ role: 'user', content: 'hi' }], maxTokens: 16 });
+  assert.equal(out.content, 'ok');
+  assert.equal(calls, 2);
+});

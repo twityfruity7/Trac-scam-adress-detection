@@ -227,6 +227,14 @@ async function main() {
             repetition_penalty: 1.1,
             tool_format: 'tools',
             timeout_ms: 120000,
+            // Reduce tool schema verbosity sent to the LLM to fit 32k context models.
+            tools_compact: true,
+            tools_compact_keep_tool_descriptions: true,
+            tools_compact_keep_schema_descriptions: false,
+            // Optional: two-pass prompting. If enabled, promptd will ask the LLM to select a small
+            // list of relevant tool names first, then run the main tool-calling pass with only those tools.
+            tools_select_pass: false,
+            tools_select_max_tools: 16,
             // Optional: OpenAI-style structured output enforcement:
             // { "type": "json_object" } or { "type": "json_schema", "json_schema": { ... } }
             response_format: { type: 'json_object' },
