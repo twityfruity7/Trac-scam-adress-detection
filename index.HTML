@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TRAC Risk Detector — P2P Scam Detection Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #080c10;
+    --surface: #0d1117;
+    --surface2: #161b22;
+    --border: #21262d;
+    --green: #00ff88;
+    --green-dim: #00cc6a;
+    --red: #ff3860;
+    --yellow: #ffd166;
+    --blue: #58a6ff;
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --font-mono: 'Space Mono', monospace;
+    --font-display: 'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+  }
+
+  /* Grid background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,255,136,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,255,136,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Glow orbs */
+  .orb {
+    position: fixed;
+    border-radius: 50%;
+    filter: blur(120px);
+    opacity: 0.12;
+    pointer-events: none;
+    z-index: 0;
+    animation: pulse 8s ease-in-out infinite alternate;
+  }
+  .orb-1 { width: 600px; height: 600px; background: var(--green); top: -200px; right: -200px; }
+  .orb-2 { width: 400px; height: 400px; background: #5800ff; bottom: -100px; left: -100px; animation-delay: 3s; }
+
+  @keyframes pulse { from { opacity: 0.08; } to { opacity: 0.18; } }
+
+  /* ─── Header ─── */
+  header {
+    position: relative; z-index: 10;
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(8,12,16,0.8);
+    backdrop-filter: blur(12px);
+  }
+
+  .logo {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .logo-icon {
+    width: 36px; height: 36px;
+    border: 2px solid var(--green);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    box-shadow: 0 0 20px rgba(0,255,136,0.3);
+    animation: blink-border 3s ease-in-out infinite;
+  }
+  @keyframes blink-border {
+    0%, 100% { box-shadow: 0 0 20px rgba(0,255,136,0.3); }
+    50% { box-shadow: 0 0 30px rgba(0,255,136,0.6); }
+  }
+  .logo-text {
+    font-family: var(--font-display);
+    font-weight: 800; font-size: 20px;
+    letter-spacing: -0.5px;
+  }
+  .logo-text span { color: var(--green); }
+
+  .status-bar {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: var(--muted);
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green);
+    animation: status-pulse 2s ease-in-out infinite;
+  }
+  @keyframes status-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.4); }
+    50% { box-shadow: 0 0 0 6px rgba(0,255,136,0); }
+  }
+
+  /* ─── Stats bar ─── */
+  .stats-bar {
+    position: relative; z-index: 10;
+    display: flex; gap: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .stat-item {
+    flex: 1; padding: 12px 20px;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .stat-item:last-child { border-right: none; }
+  .stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .stat-value { font-family: var(--font-display); font-weight: 700; font-size: 22px; color: var(--green); }
+  .stat-value.red { color: var(--red); }
+  .stat-value.blue { color: var(--blue); }
+
+  /* ─── Main layout ─── */
+  .main {
+    position: relative; z-index: 10;
+    display: flex;
+    flex: 1;
+    height: calc(100vh - 110px);
+  }
+
+  /* ─── Sidebar ─── */
+  .sidebar {
+    width: 260px;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    display: flex; flex-direction: column;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  .sidebar-section { padding: 16px; border-bottom: 1px solid var(--border); }
+  .sidebar-title {
+    font-size: 10px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 2px;
+    margin-bottom: 12px;
+  }
+
+  .quick-btn {
+    display: block; width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text); font-family: var(--font-mono);
+    font-size: 11px; padding: 8px 12px;
+    border-radius: 6px; cursor: pointer;
+    text-align: left; margin-bottom: 6px;
+    transition: all 0.15s;
+  }
+  .quick-btn:hover {
+    border-color: var(--green);
+    color: var(--green);
+    background: rgba(0,255,136,0.05);
+  }
+  .quick-btn .icon { margin-right: 6px; }
+
+  .risk-legend { display: flex; flex-direction: column; gap: 8px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ─── Chat area ─── */
+  .chat-area {
+    flex: 1;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  .messages {
+    flex: 1; overflow-y: auto;
+    padding: 24px;
+    display: flex; flex-direction: column; gap: 16px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  /* Message bubbles */
+  .msg {
+    display: flex; gap: 12px; max-width: 100%;
+    animation: msg-in 0.3s ease;
+  }
+  @keyframes msg-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .msg.user { flex-direction: row-reverse; }
+
+  .msg-avatar {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+    border: 1px solid var(--border);
+  }
+  .msg.agent .msg-avatar { background: rgba(0,255,136,0.1); border-color: var(--green); }
+  .msg.user .msg-avatar { background: rgba(88,166,255,0.1); border-color: var(--blue); }
+
+  .msg-bubble {
+    max-width: 70%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    font-size: 13px; line-height: 1.6;
+    background: var(--surface2);
+  }
+  .msg.user .msg-bubble {
+    background: rgba(88,166,255,0.08);
+    border-color: rgba(88,166,255,0.2);
+  }
+
+  /* Risk result card */
+  .risk-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-top: 8px;
+    width: 100%;
+    max-width: 520px;
+  }
+  .risk-card-header {
+    padding: 12px 16px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .risk-score-badge {
+    font-family: var(--font-display);
+    font-weight: 800; font-size: 28px;
+    min-width: 60px;
+  }
+  .risk-score-badge.high { color: var(--red); }
+  .risk-score-badge.medium { color: var(--yellow); }
+  .risk-score-badge.low, .risk-score-badge.safe { color: var(--green); }
+
+  .risk-level-text {
+    font-family: var(--font-display);
+    font-weight: 700; font-size: 13px;
+    letter-spacing: 2px; text-transform: uppercase;
+  }
+  .risk-level-text.high { color: var(--red); }
+  .risk-level-text.medium { color: var(--yellow); }
+  .risk-level-text.low, .risk-level-text.safe { color: var(--green); }
+
+  .risk-bar-wrap {
+    margin-left: auto;
+    width: 100px; height: 6px;
+    background: var(--border);
+    border-radius: 3px; overflow: hidden;
+  }
+  .risk-bar-fill {
+    height: 100%; border-radius: 3px;
+    transition: width 1s cubic-bezier(0.4,0,0.2,1);
+  }
+  .risk-bar-fill.high { background: var(--red); }
+  .risk-bar-fill.medium { background: var(--yellow); }
+  .risk-bar-fill.low, .risk-bar-fill.safe { background: var(--green); }
+
+  .risk-card-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+
+  .flags-list { display: flex; flex-direction: column; gap: 4px; }
+  .flag-item { font-size: 12px; padding: 4px 8px; background: var(--surface2); border-radius: 4px; }
+
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .stat-cell {
+    background: var(--surface2); border-radius: 6px; padding: 8px;
+    border: 1px solid var(--border);
+  }
+  .stat-cell-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .stat-cell-val { font-family: var(--font-display); font-weight: 700; font-size: 15px; margin-top: 2px; }
+
+  .verdict-text {
+    font-size: 12px; padding: 8px 12px;
+    border-radius: 6px; background: rgba(0,255,136,0.05);
+    border-left: 3px solid var(--green);
+    line-height: 1.5;
+  }
+
+  /* Address tag */
+  .addr-tag {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); word-break: break-all;
+    background: var(--surface2); border-radius: 4px;
+    padding: 4px 8px;
+  }
+
+  /* ─── Input area ─── */
+  .input-area {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    padding: 16px 24px;
+    display: flex; gap: 10px; align-items: flex-end;
+  }
+
+  .input-wrap {
+    flex: 1; position: relative;
+  }
+  .input-prefix {
+    position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+    color: var(--green); font-size: 13px; pointer-events: none;
+  }
+
+  textarea {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    padding: 12px 16px 12px 32px;
+    resize: none; outline: none;
+    min-height: 46px; max-height: 120px;
+    transition: border-color 0.2s;
+    line-height: 1.5;
+  }
+  textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(0,255,136,0.08); }
+  textarea::placeholder { color: var(--muted); }
+
+  .send-btn {
+    width: 46px; height: 46px;
+    background: var(--green);
+    border: none; border-radius: 10px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex-shrink: 0;
+    transition: all 0.15s;
+    box-shadow: 0 0 20px rgba(0,255,136,0.3);
+  }
+  .send-btn:hover { background: var(--green-dim); transform: scale(1.05); }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  /* Typing indicator */
+  .typing-indicator {
+    display: flex; gap: 5px; padding: 4px 0;
+  }
+  .typing-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green); opacity: 0.5;
+    animation: typing 1.2s ease-in-out infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes typing { 0%, 60%, 100% { opacity: 0.2; transform: scale(1); } 30% { opacity: 1; transform: scale(1.3); } }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  /* ─── Terminal-style welcome ─── */
+  .terminal-welcome {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    font-size: 12px;
+    line-height: 1.8;
+  }
+  .terminal-welcome .line-prompt { color: var(--green); }
+  .terminal-welcome .line-out { color: var(--muted); }
+  .terminal-welcome .line-highlight { color: var(--text); }
+
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .stats-bar { overflow-x: auto; }
+    .stat-item { min-width: 120px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+
+<!-- ── Header ── -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">🔍</div>
+    <div class="logo-text">TRAC <span>Risk</span> Detector</div>
+  </div>
+  <div class="status-bar">
+    <div class="status-dot"></div>
+    <span>Intercom P2P · Agent Online</span>
+  </div>
+</header>
+
+<!-- ── Stats bar ── -->
+<div class="stats-bar" id="statsBar">
+  <div class="stat-item">
+    <div class="stat-label">Total Analyzed</div>
+    <div class="stat-value" id="stat-total">—</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-label">Scams Flagged</div>
+    <div class="stat-value red" id="stat-scams">—</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-label">Safe Addresses</div>
+    <div class="stat-value" id="stat-safe">—</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-label">Network</div>
+    <div class="stat-value blue" style="font-size:13px;padding-top:4px" id="stat-net">—</div>
+  </div>
+</div>
+
+<!-- ── Main ── -->
+<div class="main">
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">Quick Actions</div>
+      <button class="quick-btn" onclick="quickSend('Check this address: 0x742d35Cc6634C0532925a3b8D4C9D4B5C7')">
+        <span class="icon">🔎</span> Check ETH Address
+      </button>
+      <button class="quick-btn" onclick="quickSend('Is this message safe? You won a free airdrop! Click now: http://scam.ru/claim')">
+        <span class="icon">📩</span> Analyze Message
+      </button>
+      <button class="quick-btn" onclick="quickSend('Check this address: 1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf')">
+        <span class="icon">₿</span> Check BTC Address
+      </button>
+      <button class="quick-btn" onclick="quickSend('help')">
+        <span class="icon">❓</span> How to Use
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-title">Risk Levels</div>
+      <div class="risk-legend">
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#ff3860"></div>
+          <span>HIGH (70–100) — Avoid</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#ffd166"></div>
+          <span>MEDIUM (40–69) — Caution</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#00ff88"></div>
+          <span>LOW (15–39) — DYOR</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#00ff88;opacity:0.4"></div>
+          <span>SAFE (0–14) — OK</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-title">Detection Methods</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.8">
+        ✓ Entropy analysis<br>
+        ✓ Tx frequency patterns<br>
+        ✓ Dust attack detection<br>
+        ✓ New wallet heuristics<br>
+        ✓ Keyword risk scoring<br>
+        ✓ Urgency language scan<br>
+        ✓ Known scam database<br>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-title">Built on</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.8">
+        🌐 Intercom P2P<br>
+        🔗 Trac Network<br>
+        🐍 Python + Flask<br>
+        ⛓ Rule-based Engine<br>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat area -->
+  <div class="chat-area">
+    <div class="messages" id="messages">
+
+      <!-- Welcome message -->
+      <div class="msg agent">
+        <div class="msg-avatar">🤖</div>
+        <div>
+          <div class="msg-bubble">
+            <div class="terminal-welcome">
+              <div class="line-prompt">$ trac-risk-detector --init</div>
+              <div class="line-out">Connecting to Intercom P2P network...</div>
+              <div class="line-out">Loading rule engine... <span style="color:var(--green)">✓ OK</span></div>
+              <div class="line-out">Agent ready.</div>
+              <br>
+              <div class="line-highlight">👋 Welcome! I'm your <strong>TRAC Risk Detection Agent</strong>.</div>
+              <div class="line-out">I can analyze wallet addresses and messages for scam/risk signals.</div>
+              <br>
+              <div class="line-out">Try pasting an ETH/BTC address or a suspicious message.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Input area -->
+    <div class="input-area">
+      <div class="input-wrap">
+        <span class="input-prefix">›</span>
+        <textarea
+          id="inputBox"
+          placeholder="Paste wallet address or suspicious message..."
+          rows="1"
+          onkeydown="handleKey(event)"
+          oninput="autoResize(this)"
+        ></textarea>
+      </div>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">⬆</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API_BASE = '';  // same origin — Flask serves both
+
+// ─── Stats loading ───────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const res = await fetch(`${API_BASE}/api/stats`);
+    const d = await res.json();
+    document.getElementById('stat-total').textContent = d.total_analyzed.toLocaleString();
+    document.getElementById('stat-scams').textContent = d.scams_flagged.toLocaleString();
+    document.getElementById('stat-safe').textContent = d.safe_addresses.toLocaleString();
+    document.getElementById('stat-net').textContent = d.network;
+  } catch(e) {
+    // If API not running, show demo values
+    document.getElementById('stat-total').textContent = '1,482';
+    document.getElementById('stat-scams').textContent = '412';
+    document.getElementById('stat-safe').textContent = '924';
+    document.getElementById('stat-net').textContent = 'Trac / Intercom';
+  }
+}
+loadStats();
+
+// ─── Messaging ───────────────────────────────────────────────────
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+function quickSend(text) {
+  document.getElementById('inputBox').value = text;
+  sendMessage();
+}
+
+function addMsg(role, content) {
+  const container = document.getElementById('messages');
+  const wrapper = document.createElement('div');
+  wrapper.className = `msg ${role}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = role === 'user' ? '👤' : '🤖';
+
+  const inner = document.createElement('div');
+
+  if (typeof content === 'string') {
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.innerHTML = content.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+    inner.appendChild(bubble);
+  } else {
+    inner.appendChild(content);
+  }
+
+  wrapper.appendChild(avatar);
+  wrapper.appendChild(inner);
+  container.appendChild(wrapper);
+  container.scrollTop = container.scrollHeight;
+  return wrapper;
+}
+
+function addTyping() {
+  const container = document.getElementById('messages');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'msg agent';
+  wrapper.id = 'typing-indicator';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = '🤖';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.innerHTML = '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
+
+  wrapper.appendChild(avatar);
+  wrapper.appendChild(bubble);
+  container.appendChild(wrapper);
+  container.scrollTop = container.scrollHeight;
+}
+
+function removeTyping() {
+  const t = document.getElementById('typing-indicator');
+  if (t) t.remove();
+}
+
+function buildRiskCard(result) {
+  const r = result.result;
+  const level = (r.risk_level || '').toLowerCase();
+  const score = r.risk_score || 0;
+
+  const wrap = document.createElement('div');
+
+  // Text intro
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.textContent = r.verdict || r.message || 'Analysis complete.';
+  wrap.appendChild(bubble);
+
+  if (!r.valid && result.intent === 'address_check') {
+    const errBubble = document.createElement('div');
+    errBubble.className = 'msg-bubble';
+    errBubble.style.marginTop = '8px';
+    errBubble.style.borderColor = 'var(--red)';
+    errBubble.innerHTML = '⛔ ' + (r.flags || ['Invalid address.']).join('<br>');
+    wrap.appendChild(errBubble);
+    return wrap;
+  }
+
+  if (result.intent === 'help') return wrap;
+
+  // Risk card
+  const card = document.createElement('div');
+  card.className = 'risk-card';
+  card.style.marginTop = '10px';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'risk-card-header';
+
+  const badge = document.createElement('div');
+  badge.className = `risk-score-badge ${level}`;
+  badge.textContent = score;
+
+  const labelWrap = document.createElement('div');
+  const levelLabel = document.createElement('div');
+  levelLabel.className = `risk-level-text ${level}`;
+  levelLabel.textContent = r.risk_level || 'UNKNOWN';
+
+  const typeTag = document.createElement('div');
+  typeTag.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px';
+  typeTag.textContent = r.type ? `Type: ${r.type}` : 'Message Analysis';
+
+  labelWrap.appendChild(levelLabel);
+  labelWrap.appendChild(typeTag);
+
+  const barWrap = document.createElement('div');
+  barWrap.className = 'risk-bar-wrap';
+  const barFill = document.createElement('div');
+  barFill.className = `risk-bar-fill ${level}`;
+  barFill.style.width = '0%';
+  barWrap.appendChild(barFill);
+  setTimeout(() => { barFill.style.width = score + '%'; }, 50);
+
+  header.appendChild(badge);
+  header.appendChild(labelWrap);
+  header.appendChild(barWrap);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'risk-card-body';
+
+  // Address tag
+  if (r.address) {
+    const addrTag = document.createElement('div');
+    addrTag.className = 'addr-tag';
+    addrTag.textContent = r.address;
+    body.appendChild(addrTag);
+  }
+
+  // Flags
+  if (r.flags && r.flags.length) {
+    const flagsWrap = document.createElement('div');
+    flagsWrap.className = 'flags-list';
+    r.flags.forEach(f => {
+      const item = document.createElement('div');
+      item.className = 'flag-item';
+      item.textContent = f;
+      flagsWrap.appendChild(item);
+    });
+    body.appendChild(flagsWrap);
+  }
+
+  // Stats grid
+  if (r.simulated_stats) {
+    const grid = document.createElement('div');
+    grid.className = 'stat-grid';
+    const stats = [
+      { label: 'TX Count', val: r.simulated_stats.estimated_tx_count },
+      { label: 'Age (days)', val: r.simulated_stats.wallet_age_days },
+      { label: 'Balance', val: r.simulated_stats.estimated_balance },
+    ];
+    stats.forEach(s => {
+      const cell = document.createElement('div');
+      cell.className = 'stat-cell';
+      cell.innerHTML = `<div class="stat-cell-label">${s.label}</div><div class="stat-cell-val">${s.val}</div>`;
+      grid.appendChild(cell);
+    });
+    body.appendChild(grid);
+  }
+
+  // Verdict
+  const verdict = document.createElement('div');
+  verdict.className = 'verdict-text';
+  if (level === 'high') verdict.style.borderColor = 'var(--red)';
+  else if (level === 'medium') verdict.style.borderColor = 'var(--yellow)';
+  verdict.textContent = r.verdict || '';
+  body.appendChild(verdict);
+
+  card.appendChild(header);
+  card.appendChild(body);
+  wrap.appendChild(card);
+  return wrap;
+}
+
+async function sendMessage() {
+  const box = document.getElementById('inputBox');
+  const text = box.value.trim();
+  if (!text) return;
+
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true;
+  box.value = '';
+  box.style.height = 'auto';
+
+  addMsg('user', text);
+  addTyping();
+
+  // Simulate network delay
+  await new Promise(r => setTimeout(r, 600 + Math.random() * 400));
+
+  try {
+    const res = await fetch(`${API_BASE}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    const data = await res.json();
+    removeTyping();
+
+    if (data.intent === 'help' && data.result.message) {
+      addMsg('agent', data.result.message);
+    } else {
+      const card = buildRiskCard(data);
+      addMsg('agent', card);
+    }
+  } catch (err) {
+    removeTyping();
+    // Fallback demo mode when backend not running
+    addMsg('agent', '⚠️ **Demo Mode** — Backend not connected.\n\nIn production, this agent runs on Python/Flask with Intercom P2P integration. Try deploying `app.py` with Flask to see live analysis.\n\nFor now, you can explore the UI.');
+  }
+
+  btn.disabled = false;
+  box.focus();
+}
+</script>
+</body>
+</html>
